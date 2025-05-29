@@ -1,0 +1,92 @@
+{
+  "family": "n8n-app",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "1024",
+  "memory": "2048",
+  "executionRoleArn": "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:role/ecsTaskExecutionRole",
+  "containerDefinitions": [
+    {
+      "name": "n8n",
+      "image": "docker.n8n.io/n8nio/n8n:latest",
+      "portMappings": [
+        {
+          "containerPort": 5678,
+          "protocol": "tcp"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/n8n-app",
+          "awslogs-region": "YOUR_AWS_REGION",
+          "awslogs-stream-prefix": "ecs"
+        }
+      },
+      "environment": [
+        {
+          "name": "NODE_ENV",
+          "value": "production"
+        },
+        {
+          "name": "N8N_HOST",
+          "value": "YOUR_ALB_DNS_NAME"
+        },
+        {
+          "name": "DB_TYPE",
+          "value": "postgresdb"
+        },
+        {
+          "name": "DB_POSTGRESDB_HOST",
+          "value": "YOUR_RDS_ENDPOINT"
+        },
+        {
+          "name": "DB_POSTGRESDB_PORT",
+          "value": "5432"
+        },
+        {
+          "name": "DB_POSTGRESDB_DATABASE",
+          "value": "n8n_database"
+        },
+        {
+          "name": "DB_POSTGRESDB_USER",
+          "value": "n8n_user"
+        },
+        {
+          "name": "EXECUTIONS_MODE",
+          "value": "queue"
+        },
+        {
+          "name": "TZ",
+          "value": "America/New_York"
+        },
+        {
+          "name": "N8N_EMAIL_MODE",
+          "value": "smtp"
+        },
+        {
+          "name": "N8N_EMAIL_SMTP_HOST",
+          "value": "YOUR_SMTP_HOST"
+        },
+        {
+          "name": "N8N_EMAIL_SMTP_PORT",
+          "value": "587"
+        },
+        {
+          "name": "N8N_EMAIL_SMTP_USER",
+          "value": "YOUR_SMTP_USER"
+        },
+        {
+          "name": "N8N_EMAIL_SMTP_SENDER",
+          "value": "noreply@yourdomain.com"
+        }
+      ],
+      "secrets": [
+        {
+          "name": "DB_POSTGRESDB_PASSWORD",
+          "valueFrom": "arn:aws:secretsmanager:YOUR_AWS_REGION:YOUR_AWS_ACCOUNT_ID:secret:YOUR_DB_PASSWORD_SECRET_NAME-XXXXXX"
+        }
+      ]
+    }
+  ]
+}

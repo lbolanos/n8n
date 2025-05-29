@@ -1,0 +1,3252 @@
+service: n8n-serverless-app
+
+provider:
+  name: aws
+  region: us-east-1 # Or make this configurable: ${opt:region, 'us-east-1'}
+  stage: ${opt:stage, 'dev'}
+
+custom:
+  vpcAzs: # Define AZs to use
+    - ${aws:region}a
+    - ${aws:region}b
+  # Allocation IDs for EIPs will be referenced directly via !GetAtt
+  # natGateway1EipAllocationId: !GetAtt NatGateway1EIP.AllocationId
+  # natGateway2EipAllocationId: !GetAtt NatGateway2EIP.AllocationId
+  # --- Example User-Defined Parameters (define in custom.params or pass via CLI) ---
+  # User should define these parameters as needed. Examples:
+  # custom:
+  #   parameters:
+  #     acmCertificateArn: "arn:aws:acm:us-east-1:123456789012:certificate/your-cert-id" # Crucial for HTTPS
+  #     logRetentionInDays: 7
+  #     taskCpu: "1024" # e.g., 1 vCPU
+  #     taskMemory: "2048" # e.g., 2GB RAM
+  #     n8nImageUrl: "docker.n8n.io/n8nio/n8n:latest"
+  #     n8nHostName: "n8n.yourdomain.com" # Crucial: Must be a real DNS name pointing to ALB
+  #     dbUserForN8NTask: "n8nadmin" # Database user for n8n task (matches RDS MasterUsername)
+  #     dbNameForN8NTask: "n8nDatabase" # Logical database name for n8n (matches RDS DBName)
+  #     executionsMode: "queue"
+  #     timezone: "America/New_York"
+  #     emailMode: "" # e.g., "smtp" or "" to disable
+  #     smtpHost: ""
+  #     smtpPort: "587"
+  #     smtpUser: ""
+  #     smtpSender: ""
+  #     smtpPasswordSecretArnForTask: "" # ARN of the N8NSmtpPasswordSecret for SMTP password
+  #     desiredTasks: 2
+  #     minTasks: 2 # For AutoScaling
+  #     maxTasks: 4 # For AutoScaling
+  #     healthCheckGracePeriodSeconds: 60
+  #     taskRoleArn: "" # Optional: ARN of an IAM role for n8n tasks if they need to interact with other AWS services
+
+resources:
+  Conditions:
+    HasOptionalTaskRole: !Not [!Equals ['${param:taskRoleArn, ""}', ""]]
+    HasSmtpPasswordSecret: !Not [!Equals ['${param:smtpPasswordSecretArnForTask, ""}', ""]]
+
+  Resources:
+    # VPC
+    VPC:
+      Type: AWS::EC2::VPC
+      Properties:
+        CidrBlock: 10.0.0.0/16
+        EnableDnsSupport: true
+        EnableDnsHostnames: true
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-vpc
+
+    # Subnets - Public (for ALB, NAT Gateways)
+    PublicSubnet1:
+      Type: AWS::EC2::Subnet
+      Properties:
+        VpcId: !Ref VPC
+        CidrBlock: 10.0.1.0/24
+        AvailabilityZone: ${self:custom.vpcAzs[0]}
+        MapPublicIpOnLaunch: true
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-public-subnet-1
+    PublicSubnet2:
+      Type: AWS::EC2::Subnet
+      Properties:
+        VpcId: !Ref VPC
+        CidrBlock: 10.0.2.0/24
+        AvailabilityZone: ${self:custom.vpcAzs[1]}
+        MapPublicIpOnLaunch: true
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-public-subnet-2
+
+    # Subnets - Private (for Fargate tasks, RDS)
+    PrivateSubnet1:
+      Type: AWS::EC2::Subnet
+      Properties:
+        VpcId: !Ref VPC
+        CidrBlock: 10.0.101.0/24
+        AvailabilityZone: ${self:custom.vpcAzs[0]}
+        MapPublicIpOnLaunch: false
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-private-subnet-1
+    PrivateSubnet2:
+      Type: AWS::EC2::Subnet
+      Properties:
+        VpcId: !Ref VPC
+        CidrBlock: 10.0.102.0/24
+        AvailabilityZone: ${self:custom.vpcAzs[1]}
+        MapPublicIpOnLaunch: false
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-private-subnet-2
+
+    # Internet Gateway
+    InternetGateway:
+      Type: AWS::EC2::InternetGateway
+      Properties:
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-igw
+    AttachGateway:
+      Type: AWS::EC2::VPCGatewayAttachment
+      Properties:
+        VpcId: !Ref VPC
+        InternetGatewayId: !Ref InternetGateway
+
+    # Elastic IPs for NAT Gateways
+    NatGateway1EIP:
+      Type: AWS::EC2::EIP
+      Properties:
+        Domain: vpc # Important for EIPs used by NAT Gateways
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-nat-eip-1
+    NatGateway2EIP:
+      Type: AWS::EC2::EIP
+      Properties:
+        Domain: vpc
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-nat-eip-2
+
+    # NAT Gateways
+    NatGateway1:
+      Type: AWS::EC2::NATGateway
+      Properties:
+        AllocationId: !GetAtt NatGateway1EIP.AllocationId
+        SubnetId: !Ref PublicSubnet1
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-nat-gw-1
+    NatGateway2:
+      Type: AWS::EC2::NATGateway
+      Properties:
+        AllocationId: !GetAtt NatGateway2EIP.AllocationId
+        SubnetId: !Ref PublicSubnet2
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-nat-gw-2
+
+    # Route Tables
+    PublicRouteTable:
+      Type: AWS::EC2::RouteTable
+      Properties:
+        VpcId: !Ref VPC
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-public-rt
+    DefaultPublicRoute:
+      Type: AWS::EC2::Route
+      DependsOn: AttachGateway # Ensure IGW is attached before adding route
+      Properties:
+        RouteTableId: !Ref PublicRouteTable
+        DestinationCidrBlock: 0.0.0.0/0
+        GatewayId: !Ref InternetGateway
+    PublicSubnet1RouteTableAssociation:
+      Type: AWS::EC2::SubnetRouteTableAssociation
+      Properties:
+        SubnetId: !Ref PublicSubnet1
+        RouteTableId: !Ref PublicRouteTable
+    PublicSubnet2RouteTableAssociation:
+      Type: AWS::EC2::SubnetRouteTableAssociation
+      Properties:
+        SubnetId: !Ref PublicSubnet2
+        RouteTableId: !Ref PublicRouteTable
+
+    PrivateRouteTable1:
+      Type: AWS::EC2::RouteTable
+      Properties:
+        VpcId: !Ref VPC
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-private-rt-1
+    DefaultPrivateRoute1:
+      Type: AWS::EC2::Route
+      Properties:
+        RouteTableId: !Ref PrivateRouteTable1
+        DestinationCidrBlock: 0.0.0.0/0
+        NatGatewayId: !Ref NatGateway1 # Route through NAT GW 1
+    PrivateSubnet1RouteTableAssociation:
+      Type: AWS::EC2::SubnetRouteTableAssociation
+      Properties:
+        SubnetId: !Ref PrivateSubnet1
+        RouteTableId: !Ref PrivateRouteTable1
+
+    PrivateRouteTable2:
+      Type: AWS::EC2::RouteTable
+      Properties:
+        VpcId: !Ref VPC
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-private-rt-2
+    DefaultPrivateRoute2:
+      Type: AWS::EC2::Route
+      Properties:
+        RouteTableId: !Ref PrivateRouteTable2
+        DestinationCidrBlock: 0.0.0.0/0
+        NatGatewayId: !Ref NatGateway2 # Route through NAT GW 2
+    PrivateSubnet2RouteTableAssociation:
+      Type: AWS::EC2::SubnetRouteTableAssociation
+      Properties:
+        SubnetId: !Ref PrivateSubnet2
+        RouteTableId: !Ref PrivateRouteTable2
+
+  Outputs:
+    VPCId:
+      Description: "ID of the new VPC"
+      Value: !Ref VPC
+      Export:
+        Name: ${self:service}-${self:provider.stage}-VPCId
+    PublicSubnetOneId:
+      Description: "ID of Public Subnet 1"
+      Value: !Ref PublicSubnet1
+      Export:
+        Name: ${self:service}-${self:provider.stage}-PublicSubnetOneId
+    PublicSubnetTwoId:
+      Description: "ID of Public Subnet 2"
+      Value: !Ref PublicSubnet2
+      Export:
+        Name: ${self:service}-${self:provider.stage}-PublicSubnetTwoId
+    PrivateSubnetOneId:
+      Description: "ID of Private Subnet 1"
+      Value: !Ref PrivateSubnet1
+      Export:
+        Name: ${self:service}-${self:provider.stage}-PrivateSubnetOneId
+    PrivateSubnetTwoId:
+      Description: "ID of Private Subnet 2"
+      Value: !Ref PrivateSubnet2
+      Export:
+        Name: ${self:service}-${self:provider.stage}-PrivateSubnetTwoId
+    # Outputting all subnet IDs as a list can also be useful
+    AllPublicSubnetIds:
+      Description: "Comma-delimited list of Public Subnet IDs"
+      Value: !Join [",", [!Ref PublicSubnet1, !Ref PublicSubnet2]]
+      Export:
+        Name: ${self:service}-${self:provider.stage}-AllPublicSubnetIds
+    AllPrivateSubnetIds:
+      Description: "Comma-delimited list of Private Subnet IDs"
+      Value: !Join [",", [!Ref PrivateSubnet1, !Ref PrivateSubnet2]]
+      Export:
+        Name: ${self:service}-${self:provider.stage}-AllPrivateSubnetIds
+
+    # Secrets Manager
+    N8NDBPasswordSecret:
+      Type: AWS::SecretsManager::Secret
+      Properties:
+        Name: ${self:service}/${self:provider.stage}/rds-master-password
+        Description: "RDS master password for n8n"
+        GenerateSecretString:
+          SecretStringTemplate: '{"username": "n8nadmin"}' # n8n will use its own DB_USER, this is for RDS master
+          GenerateStringKey: "password"
+          PasswordLength: 32
+          ExcludeCharacters: '"@/\`' # Characters that can cause issues
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-rds-master-password-secret
+
+    N8NEncryptionKeySecret:
+      Type: AWS::SecretsManager::Secret
+      Properties:
+        Name: ${self:service}/${self:provider.stage}/n8n-encryption-key
+        Description: "n8n encryption key (user to populate with strong random string)"
+        # SecretString: "PLEASE_REPLACE_WITH_A_STRONG_RANDOM_32_CHAR_STRING" # Alternative: User populates after creation
+        # For a more automated approach, a Lambda custom resource could generate and store this,
+        # but for now, we'll create the secret and the user can update its value.
+        # Or, if Serverless Framework allows generating a generic secret string (not just password like):
+        GenerateSecretString: # This will generate a random UUID-like string if SecretStringTemplate is omitted for the key
+          GenerateStringKey: "encryptionKey"
+          PasswordLength: 32 # Length of the generated key
+          ExcludeCharacters: '"@/\`' # Avoid problematic characters
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-encryption-key-secret
+
+    # Optional: SMTP Password Secret (User would manually create the secret value)
+    # To make this fully Serverless Framework managed, one might need to know the password
+    # or have a mechanism to populate it. For now, define it so it can be referenced.
+    N8NSmtpPasswordSecret:
+      Type: AWS::SecretsManager::Secret
+      Properties:
+        Name: ${self:service}/${self:provider.stage}/smtp-password
+        Description: "SMTP password for n8n (user to populate if SMTP auth is used)"
+        # SecretString: "PLEASE_REPLACE_WITH_YOUR_SMTP_PASSWORD" # User populates
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-smtp-password-secret
+
+    # RDS Database
+    DBSubnetGroup:
+      Type: AWS::RDS::DBSubnetGroup
+      Properties:
+        DBSubnetGroupDescription: "Subnet group for n8n RDS instance"
+        SubnetIds: # Reference the private subnets created earlier
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-db-subnet-group
+
+    DBParameterGroup:
+      Type: AWS::RDS::DBParameterGroup
+      Properties:
+        Description: "Parameter group for n8n RDS PostgreSQL with pgvector considerations"
+        Family: postgres15 # Example: Aim for PostgreSQL 15. Adjust if needed for pgvector support on RDS.
+                           # Check AWS RDS documentation for the latest supported family for pgvector.
+        Parameters:
+          log_connections: "1"
+          log_disconnections: "1"
+          log_statement: "ddl"
+          # Attempt to preload pgvector. This might vary based on RDS version and how pgvector is packaged.
+          # Some versions might require 'pgvector' in shared_preload_libraries, others might make it available by default.
+          # If this is not enough, a custom resource will be needed to run CREATE EXTENSION.
+          # For some managed pgvector on RDS, this might not be needed or might be different.
+          # shared_preload_libraries: "pg_stat_statements,pg_hint_plan,pgvector" # Example
+          # As a simpler start, we'll omit shared_preload_libraries for now and assume pgvector can be enabled via CREATE EXTENSION
+          # if the RDS version supports it. If specific preloading is found to be required for pgvector on the chosen engine,
+          # it can be added here. For now, focus on parameters that are generally good for PostgreSQL.
+          rds.logical_replication: "1" # For potential future read replicas or other replication needs
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-db-param-group
+
+    # Security Groups
+    ALBSecurityGroup:
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+        GroupDescription: "Security group for n8n ALB"
+        VpcId: !Ref VPC
+        SecurityGroupIngress:
+          - IpProtocol: tcp
+            FromPort: 443 # HTTPS
+            ToPort: 443
+            CidrIp: 0.0.0.0/0
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-alb-sg
+
+    FargateServiceSecurityGroup:
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+        GroupDescription: "Security group for n8n Fargate service"
+        VpcId: !Ref VPC
+        SecurityGroupIngress: # Allow inbound from ALB on n8n port
+          - IpProtocol: tcp
+            FromPort: 5678 # n8n application port
+            ToPort: 5678
+            SourceSecurityGroupId: !GetAtt ALBSecurityGroup.GroupId
+        SecurityGroupEgress: # Allow all outbound for image pulling & n8n operations
+          - IpProtocol: "-1"
+            CidrIp: 0.0.0.0/0
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-fargate-sg
+
+    RDSSecurityGroup:
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+        GroupDescription: "Security Group for n8n RDS instance"
+        VpcId: !Ref VPC
+        SecurityGroupIngress:
+          - IpProtocol: tcp
+            FromPort: 5432 # PostgreSQL port
+            ToPort: 5432
+            SourceSecurityGroupId: !GetAtt FargateServiceSecurityGroup.GroupId # Allow from Fargate tasks
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-rds-sg
+
+    N8NPostgresDBInstance:
+      Type: AWS::RDS::DBInstance
+      Properties:
+        DBName: n8nDatabase # Or make this a parameter
+        Engine: postgres
+        EngineVersion: "15.5" # Example: Check AWS RDS for latest versions that support pgvector
+        DBInstanceClass: db.t3.medium # Or make this a parameter: e.g., ${param:dbInstanceClass, 'db.t3.medium'}
+        AllocatedStorage: "100" # In GB, make this a parameter
+        StorageType: gp3 # General Purpose SSD (gp3)
+        # IOPS: 3000 # Required if using io1 or gp3 and want to specify, otherwise default for gp3
+        # StorageThroughput: 125 # Required for gp3, value depends on storage size and IOPS
+        MasterUsername: n8nadmin # As defined in N8NDBPasswordSecret's SecretStringTemplate
+        MasterUserPassword: !Join ['', ['{{resolve:secretsmanager:', !Ref N8NDBPasswordSecret, ':SecretString:password}}']]
+        DBSubnetGroupName: !Ref DBSubnetGroup
+        DBParameterGroupName: !Ref DBParameterGroup
+        VPCSecurityGroups:
+          - !Ref RDSSecurityGroup # This SG needs to allow access from Fargate tasks SG
+        MultiAZ: true # For High Availability
+        PubliclyAccessible: false
+        BackupRetentionPeriod: 7 # Days, make this a parameter
+        PreferredBackupWindow: "03:00-04:00" # UTC, make this a parameter
+        PreferredMaintenanceWindow: "sun:04:00-sun:05:00" # UTC, make this a parameter
+        StorageEncrypted: true
+        CopyTagsToSnapshot: true
+        DeleteAutomatedBackups: false # Set to true for dev/test if you don't want to retain backups on delete
+        DeletionPolicy: Snapshot # Or 'Retain' for production, 'Delete' for dev/test. 'Snapshot' is a good default.
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-db
+      # DependsOn:
+        # - DBParameterGroup # Implicit dependency
+  Outputs:
+    VPCId:
+      Description: "ID of the new VPC"
+      Value: !Ref VPC
+      Export:
+        Name: ${self:service}-${self:provider.stage}-VPCId
+    PublicSubnetOneId:
+      Description: "ID of Public Subnet 1"
+      Value: !Ref PublicSubnet1
+      Export:
+        Name: ${self:service}-${self:provider.stage}-PublicSubnetOneId
+    PublicSubnetTwoId:
+      Description: "ID of Public Subnet 2"
+      Value: !Ref PublicSubnet2
+      Export:
+        Name: ${self:service}-${self:provider.stage}-PublicSubnetTwoId
+    PrivateSubnetOneId:
+      Description: "ID of Private Subnet 1"
+      Value: !Ref PrivateSubnet1
+      Export:
+        Name: ${self:service}-${self:provider.stage}-PrivateSubnetOneId
+    PrivateSubnetTwoId:
+      Description: "ID of Private Subnet 2"
+      Value: !Ref PrivateSubnet2
+      Export:
+        Name: ${self:service}-${self:provider.stage}-PrivateSubnetTwoId
+    # Outputting all subnet IDs as a list can also be useful
+    AllPublicSubnetIds:
+      Description: "Comma-delimited list of Public Subnet IDs"
+      Value: !Join [",", [!Ref PublicSubnet1, !Ref PublicSubnet2]]
+      Export:
+        Name: ${self:service}-${self:provider.stage}-AllPublicSubnetIds
+    AllPrivateSubnetIds:
+      Description: "Comma-delimited list of Private Subnet IDs"
+      Value: !Join [",", [!Ref PrivateSubnet1, !Ref PrivateSubnet2]]
+      Export:
+        Name: ${self:service}-${self:provider.stage}-AllPrivateSubnetIds
+    N8NDBPasswordSecretArn:
+      Description: "ARN of the RDS master password secret"
+      Value: !Ref N8NDBPasswordSecret
+      Export:
+        Name: ${self:service}-${self:provider.stage}-N8NDBPasswordSecretArn
+    N8NEncryptionKeySecretArn:
+      Description: "ARN of the n8n encryption key secret"
+      Value: !Ref N8NEncryptionKeySecret
+      Export:
+        Name: ${self:service}-${self:provider.stage}-N8NEncryptionKeySecretArn
+    N8NSmtpPasswordSecretArn:
+      Description: "ARN of the SMTP password secret (if used)"
+      Value: !Ref N8NSmtpPasswordSecret
+      Export:
+        Name: ${self:service}-${self:provider.stage}-N8NSmtpPasswordSecretArn
+    ALBSecurityGroupId:
+      Description: "ID of the ALB Security Group"
+      Value: !GetAtt ALBSecurityGroup.GroupId
+      Export:
+        Name: ${self:service}-${self:provider.stage}-ALBSecurityGroupId
+    FargateServiceSecurityGroupId:
+      Description: "ID of the Fargate Service Security Group"
+      Value: !GetAtt FargateServiceSecurityGroup.GroupId
+      Export:
+        Name: ${self:service}-${self:provider.stage}-FargateServiceSecurityGroupId
+    RDSSecurityGroupIdOutput: # Renamed to avoid conflict with potential parameter
+      Description: "ID of the RDS Security Group"
+      Value: !GetAtt RDSSecurityGroup.GroupId
+      Export:
+        Name: ${self:service}-${self:provider.stage}-RDSSecurityGroupId
+    FargateTaskExecutionRoleArn:
+      Description: "ARN of the Fargate Task Execution Role"
+      Value: !GetAtt FargateTaskExecutionRole.Arn
+      Export:
+        Name: ${self:service}-${self:provider.stage}-FargateTaskExecutionRoleArn
+
+    # IAM Role for Fargate Task Execution (Appended Here)
+    FargateTaskExecutionRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: ${self:service}-${self:provider.stage}-FargateTaskExecutionRole
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: ecs-tasks.amazonaws.com
+              Action: sts:AssumeRole
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-FargateTaskExecutionRole
+
+    # Application Load Balancer
+    ApplicationLoadBalancer:
+      Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+      Properties:
+        Name: ${self:service}-${self:provider.stage}-alb
+        Scheme: internet-facing
+        IpAddressType: ipv4
+        SecurityGroups:
+          - !Ref ALBSecurityGroup # Defined in previous step
+        Subnets: # Use the public subnets
+          - !Ref PublicSubnet1
+          - !Ref PublicSubnet2
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-alb
+
+    ALBTargetGroup:
+      Type: AWS::ElasticLoadBalancingV2::TargetGroup
+      Properties:
+        Name: ${self:service}-${self:provider.stage}-n8n-tg
+        VpcId: !Ref VPC
+        Protocol: HTTP
+        Port: 5678 # n8n container port
+        TargetType: ip # Required for Fargate
+        HealthCheck:
+          Enabled: true
+          Path: /healthz # n8n health check endpoint
+          Protocol: HTTP
+          Port: "traffic-port"
+          Matcher:
+            HttpCode: "200"
+          IntervalSeconds: 30
+          TimeoutSeconds: 5
+          HealthyThresholdCount: 2
+          UnhealthyThresholdCount: 2
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-target-group
+
+    ALBListenerHTTPS:
+      Type: AWS::ElasticLoadBalancingV2::Listener
+      Properties:
+        LoadBalancerArn: !Ref ApplicationLoadBalancer
+        Protocol: HTTPS
+        Port: 443
+        Certificates: # User needs to provide an ACM Certificate ARN
+          - CertificateArn: ${param:acmCertificateArn, "PLEASE_PROVIDE_ACM_CERTIFICATE_ARN"}
+            # Example: arn:aws:acm:us-east-1:123456789012:certificate/your-certificate-id
+        DefaultActions:
+          - Type: forward
+            TargetGroupArn: !Ref ALBTargetGroup
+    DBInstanceEndpoint:
+      Description: "Endpoint address of the RDS instance"
+      Value: !GetAtt N8NPostgresDBInstance.Endpoint.Address
+      Export:
+        Name: ${self:service}-${self:provider.stage}-DBInstanceEndpoint
+    DBInstancePort:
+      Description: "Port of the RDS instance"
+      Value: !GetAtt N8NPostgresDBInstance.Endpoint.Port
+      Export:
+        Name: ${self:service}-${self:provider.stage}-DBInstancePort
+    DBInstanceName:
+      Description: "Name of the RDS Database (logical database, not instance identifier)"
+      Value: !GetAtt N8NPostgresDBInstance.DBName # This will return the actual DBName property
+      Export:
+        Name: ${self:service}-${self:provider.stage}-DBName
+    ALBDNSName:
+      Description: "DNS Name of the Application Load Balancer"
+      Value: !GetAtt ApplicationLoadBalancer.DNSName
+      Export:
+        Name: ${self:service}-${self:provider.stage}-ALBDNSName
+    ALBArn:
+      Description: "ARN of the ApplicationLoadBalancer"
+      Value: !Ref ApplicationLoadBalancer
+      Export:
+        Name: ${self:service}-${self:provider.stage}-ALBArn
+    TargetGroupArn:
+      Description: "ARN of the ALB Target Group"
+      Value: !Ref ALBTargetGroup
+      Export:
+        Name: ${self:service}-${self:provider.stage}-TargetGroupArn
+    ECSClusterName:
+      Description: "Name of the ECS Cluster"
+      Value: !Ref ECSCluster
+      Export:
+        Name: ${self:service}-${self:provider.stage}-ECSClusterName
+    N8NTaskDefinitionArn:
+      Description: "ARN of the n8n Task Definition"
+      Value: !Ref N8NTaskDefinition
+      Export:
+        Name: ${self:service}-${self:provider.stage}-N8NTaskDefinitionArn
+    N8NFargateServiceName:
+      Description: "Name of the n8n Fargate Service"
+      Value: !GetAtt N8NFargateService.Name # Service name is an attribute
+      Export:
+        Name: ${self:service}-${self:provider.stage}-N8NFargateServiceName
+
+    # ECS Cluster
+    ECSCluster:
+      Type: AWS::ECS::Cluster
+      Properties:
+        ClusterName: ${self:service}-${self:provider.stage}-n8n-cluster
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-cluster
+
+    # CloudWatch Log Group for Fargate Tasks
+    N8NLogGroup:
+      Type: AWS::Logs::LogGroup
+      Properties:
+        LogGroupName: /ecs/${self:service}-${self:provider.stage}/n8n-app
+        RetentionInDays: ${param:logRetentionInDays, 7}
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-log-group
+
+    # Fargate Task Definition for n8n
+    N8NTaskDefinition:
+      Type: AWS::ECS::TaskDefinition
+      Properties:
+        Family: ${self:service}-${self:provider.stage}-n8n-app
+        NetworkMode: awsvpc
+        RequiresCompatibilities:
+          - FARGATE
+        Cpu: ${param:taskCpu, "1024"}
+        Memory: ${param:taskMemory, "2048"}
+        ExecutionRoleArn: !Ref FargateTaskExecutionRole
+        TaskRoleArn: !If [HasOptionalTaskRole, '${param:taskRoleArn}', !Ref "AWS::NoValue"]
+        ContainerDefinitions:
+          - Name: n8n # This name is referenced by the ECS Service LoadBalancer config
+            Image: ${param:n8nImageUrl, "docker.n8n.io/n8nio/n8n:latest"}
+            PortMappings:
+              - ContainerPort: 5678
+                Protocol: tcp
+            LogConfiguration:
+              LogDriver: awslogs
+              Options:
+                awslogs-group: !Ref N8NLogGroup
+                awslogs-region: !Ref AWS::Region
+                awslogs-stream-prefix: ecs-n8n
+            Environment:
+              - Name: NODE_ENV
+                Value: "production"
+              - Name: N8N_HOST
+                Value: ${param:n8nHostName} # User must provide this, e.g., n8n.yourdomain.com
+              - Name: DB_TYPE
+                Value: "postgresdb"
+              - Name: DB_POSTGRESDB_HOST
+                Value: !GetAtt N8NPostgresDBInstance.Endpoint.Address
+              - Name: DB_POSTGRESDB_PORT
+                Value: !GetAtt N8NPostgresDBInstance.Endpoint.Port
+              - Name: DB_POSTGRESDB_DATABASE
+                Value: ${param:dbNameForN8NTask, "n8nDatabase"} # Should match N8NPostgresDBInstance.Properties.DBName
+              - Name: DB_POSTGRESDB_USER
+                Value: ${param:dbUserForN8NTask, "n8nadmin"} # Should match N8NPostgresDBInstance.Properties.MasterUsername
+              - Name: EXECUTIONS_MODE
+                Value: ${param:executionsMode, "queue"}
+              - Name: TZ
+                Value: ${param:timezone, "America/New_York"}
+              - Name: N8N_EMAIL_MODE
+                Value: ${param:emailMode, ""}
+              - Name: N8N_EMAIL_SMTP_HOST
+                Value: ${param:smtpHost, ""}
+              - Name: N8N_EMAIL_SMTP_PORT
+                Value: ${param:smtpPort, "587"}
+              - Name: N8N_EMAIL_SMTP_USER
+                Value: ${param:smtpUser, ""}
+              - Name: N8N_EMAIL_SMTP_SENDER
+                Value: ${param:smtpSender, ""}
+            Secrets:
+              - Name: DB_POSTGRESDB_PASSWORD
+                ValueFrom: !Ref N8NDBPasswordSecret # ARN of the RDS master password secret (created by this template)
+              - Name: N8N_ENCRYPTION_KEY
+                ValueFrom: !Ref N8NEncryptionKeySecret # ARN of the n8n encryption key secret (created by this template)
+              - Name: N8N_EMAIL_SMTP_PASSWORD
+                ValueFrom: !If [HasSmtpPasswordSecret, '${param:smtpPasswordSecretArnForTask}', !Ref "AWS::NoValue"]
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-task-def
+
+    # ECS Service for n8n on Fargate
+    N8NFargateService:
+      Type: AWS::ECS::Service
+      Properties:
+        ServiceName: ${self:service}-${self:provider.stage}-n8n-service
+        Cluster: !Ref ECSCluster
+        TaskDefinition: !Ref N8NTaskDefinition
+        DesiredCount: ${param:desiredTasks, 2}
+        LaunchType: FARGATE
+        NetworkConfiguration:
+          AwsvpcConfiguration:
+            Subnets:
+              - !Ref PrivateSubnet1
+              - !Ref PrivateSubnet2
+            SecurityGroups:
+              - !Ref FargateServiceSecurityGroup
+            AssignPublicIp: DISABLED # Corrected
+        LoadBalancers:
+          - TargetGroupArn: !Ref ALBTargetGroup
+            ContainerName: "n8n" # Must match name in TaskDefinition.ContainerDefinitions
+            ContainerPort: 5678
+        EnableECSManagedTags: true
+        PropagateTags: SERVICE
+        DeploymentConfiguration:
+          MinimumHealthyPercent: 50
+          MaximumPercent: 200
+        HealthCheckGracePeriodSeconds: ${param:healthCheckGracePeriodSeconds, 60}
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-fargate-service
+      DependsOn:
+        - ALBListenerHTTPS # Ensure listener is ready before service tries to register
+
+    # Auto Scaling for Fargate Service
+    N8NServiceScalableTarget:
+      Type: AWS::ApplicationAutoScaling::ScalableTarget
+      Properties:
+        ServiceNamespace: ecs
+        ResourceId: !Join ['', ['service/', !Ref ECSCluster, '/', !GetAtt N8NFargateService.Name]]
+        ScalableDimension: ecs:service:DesiredCount
+        MinCapacity: ${param:minTasks, 2}
+        MaxCapacity: ${param:maxTasks, 4}
+
+    N8NServiceCpuScalingPolicy:
+      Type: AWS::ApplicationAutoScaling::ScalingPolicy
+      Properties:
+        PolicyName: ${self:service}-${self:provider.stage}-n8n-cpu-scaling
+        PolicyType: TargetTrackingScaling
+        ScalingTargetId: !Ref N8NServiceScalableTarget
+        TargetTrackingScalingPolicyConfiguration:
+          TargetValue: 75.0
+          ScaleInCooldown: 300
+          ScaleOutCooldown: 60
+          PredefinedMetricSpecification:
+            PredefinedMetricType: ECSServiceAverageCPUUtilization
+
+    N8NServiceMemoryScalingPolicy:
+      Type: AWS::ApplicationAutoScaling::ScalingPolicy
+      Properties:
+        PolicyName: ${self:service}-${self:provider.stage}-n8n-memory-scaling
+        PolicyType: TargetTrackingScaling
+        ScalingTargetId: !Ref N8NServiceScalableTarget
+        TargetTrackingScalingPolicyConfiguration:
+          TargetValue: 75.0
+          ScaleInCooldown: 300
+          ScaleOutCooldown: 60
+          PredefinedMetricSpecification:
+            PredefinedMetricType: ECSServiceAverageMemoryUtilization
+    ECSClusterName:
+      Description: "Name of the ECS Cluster"
+      Value: !Ref ECSCluster
+      Export:
+        Name: ${self:service}-${self:provider.stage}-ECSClusterName
+    N8NTaskDefinitionArn:
+      Description: "ARN of the n8n Task Definition"
+      Value: !Ref N8NTaskDefinition
+      Export:
+        Name: ${self:service}-${self:provider.stage}-N8NTaskDefinitionArn
+    N8NFargateServiceName:
+      Description: "Name of the n8n Fargate Service"
+      Value: !GetAtt N8NFargateService.Name # Service name is an attribute
+      Export:
+        Name: ${self:service}-${self:provider.stage}-N8NFargateServiceName
+
+    # ECS Cluster
+    ECSCluster:
+      Type: AWS::ECS::Cluster
+      Properties:
+        ClusterName: ${self:service}-${self:provider.stage}-n8n-cluster
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-cluster
+
+    # CloudWatch Log Group for Fargate Tasks
+    N8NLogGroup:
+      Type: AWS::Logs::LogGroup
+      Properties:
+        LogGroupName: /ecs/${self:service}-${self:provider.stage}/n8n-app
+        RetentionInDays: ${param:logRetentionInDays, 7}
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-log-group
+
+    # Fargate Task Definition for n8n
+    N8NTaskDefinition:
+      Type: AWS::ECS::TaskDefinition
+      Properties:
+        Family: ${self:service}-${self:provider.stage}-n8n-app
+        NetworkMode: awsvpc
+        RequiresCompatibilities:
+          - FARGATE
+        Cpu: ${param:taskCpu, "1024"}
+        Memory: ${param:taskMemory, "2048"}
+        ExecutionRoleArn: !Ref FargateTaskExecutionRole
+        TaskRoleArn: !If [HasOptionalTaskRole, '${param:taskRoleArn}', !Ref "AWS::NoValue"]
+        ContainerDefinitions:
+          - Name: n8n # This name is referenced by the ECS Service LoadBalancer config
+            Image: ${param:n8nImageUrl, "docker.n8n.io/n8nio/n8n:latest"}
+            PortMappings:
+              - ContainerPort: 5678
+                Protocol: tcp
+            LogConfiguration:
+              LogDriver: awslogs
+              Options:
+                awslogs-group: !Ref N8NLogGroup
+                awslogs-region: !Ref AWS::Region
+                awslogs-stream-prefix: ecs-n8n
+            Environment:
+              - Name: NODE_ENV
+                Value: "production"
+              - Name: N8N_HOST
+                Value: ${param:n8nHostName} # User must provide this, e.g., n8n.yourdomain.com
+              - Name: DB_TYPE
+                Value: "postgresdb"
+              - Name: DB_POSTGRESDB_HOST
+                Value: !GetAtt N8NPostgresDBInstance.Endpoint.Address
+              - Name: DB_POSTGRESDB_PORT
+                Value: !GetAtt N8NPostgresDBInstance.Endpoint.Port
+              - Name: DB_POSTGRESDB_DATABASE
+                Value: ${param:dbNameForN8NTask, "n8nDatabase"} # Should match N8NPostgresDBInstance.Properties.DBName
+              - Name: DB_POSTGRESDB_USER
+                Value: ${param:dbUserForN8NTask, "n8nadmin"} # Should match N8NPostgresDBInstance.Properties.MasterUsername
+              - Name: EXECUTIONS_MODE
+                Value: ${param:executionsMode, "queue"}
+              - Name: TZ
+                Value: ${param:timezone, "America/New_York"}
+              - Name: N8N_EMAIL_MODE
+                Value: ${param:emailMode, ""}
+              - Name: N8N_EMAIL_SMTP_HOST
+                Value: ${param:smtpHost, ""}
+              - Name: N8N_EMAIL_SMTP_PORT
+                Value: ${param:smtpPort, "587"}
+              - Name: N8N_EMAIL_SMTP_USER
+                Value: ${param:smtpUser, ""}
+              - Name: N8N_EMAIL_SMTP_SENDER
+                Value: ${param:smtpSender, ""}
+            Secrets:
+              - Name: DB_POSTGRESDB_PASSWORD
+                ValueFrom: !Ref N8NDBPasswordSecret # ARN of the RDS master password secret (created by this template)
+              - Name: N8N_ENCRYPTION_KEY
+                ValueFrom: !Ref N8NEncryptionKeySecret # ARN of the n8n encryption key secret (created by this template)
+              - Name: N8N_EMAIL_SMTP_PASSWORD
+                ValueFrom: !If [HasSmtpPasswordSecret, '${param:smtpPasswordSecretArnForTask}', !Ref "AWS::NoValue"]
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-task-def
+
+    # ECS Service for n8n on Fargate
+    N8NFargateService:
+      Type: AWS::ECS::Service
+      Properties:
+        ServiceName: ${self:service}-${self:provider.stage}-n8n-service
+        Cluster: !Ref ECSCluster
+        TaskDefinition: !Ref N8NTaskDefinition
+        DesiredCount: ${param:desiredTasks, 2}
+        LaunchType: FARGATE
+        NetworkConfiguration:
+          AwsvpcConfiguration:
+            Subnets:
+              - !Ref PrivateSubnet1
+              - !Ref PrivateSubnet2
+            SecurityGroups:
+              - !Ref FargateServiceSecurityGroup
+            AssignPublicIp: DISABLED # Corrected
+        LoadBalancers:
+          - TargetGroupArn: !Ref ALBTargetGroup
+            ContainerName: "n8n" # Must match name in TaskDefinition.ContainerDefinitions
+            ContainerPort: 5678
+        EnableECSManagedTags: true
+        PropagateTags: SERVICE
+        DeploymentConfiguration:
+          MinimumHealthyPercent: 50
+          MaximumPercent: 200
+        HealthCheckGracePeriodSeconds: ${param:healthCheckGracePeriodSeconds, 60}
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-fargate-service
+      DependsOn:
+        - ALBListenerHTTPS # Ensure listener is ready before service tries to register
+
+    # Auto Scaling for Fargate Service
+    N8NServiceScalableTarget:
+      Type: AWS::ApplicationAutoScaling::ScalableTarget
+      Properties:
+        ServiceNamespace: ecs
+        ResourceId: !Join ['', ['service/', !Ref ECSCluster, '/', !GetAtt N8NFargateService.Name]]
+        ScalableDimension: ecs:service:DesiredCount
+        MinCapacity: ${param:minTasks, 2}
+        MaxCapacity: ${param:maxTasks, 4}
+
+    N8NServiceCpuScalingPolicy:
+      Type: AWS::ApplicationAutoScaling::ScalingPolicy
+      Properties:
+        PolicyName: ${self:service}-${self:provider.stage}-n8n-cpu-scaling
+        PolicyType: TargetTrackingScaling
+        ScalingTargetId: !Ref N8NServiceScalableTarget
+        TargetTrackingScalingPolicyConfiguration:
+          TargetValue: 75.0
+          ScaleInCooldown: 300
+          ScaleOutCooldown: 60
+          PredefinedMetricSpecification:
+            PredefinedMetricType: ECSServiceAverageCPUUtilization
+
+    N8NServiceMemoryScalingPolicy:
+      Type: AWS::ApplicationAutoScaling::ScalingPolicy
+      Properties:
+        PolicyName: ${self:service}-${self:provider.stage}-n8n-memory-scaling
+        PolicyType: TargetTrackingScaling
+        ScalingTargetId: !Ref N8NServiceScalableTarget
+        TargetTrackingScalingPolicyConfiguration:
+          TargetValue: 75.0
+          ScaleInCooldown: 300
+          ScaleOutCooldown: 60
+          PredefinedMetricSpecification:
+            PredefinedMetricType: ECSServiceAverageMemoryUtilization
+    ECSClusterName:
+      Description: "Name of the ECS Cluster"
+      Value: !Ref ECSCluster
+      Export:
+        Name: ${self:service}-${self:provider.stage}-ECSClusterName
+    N8NTaskDefinitionArn:
+      Description: "ARN of the n8n Task Definition"
+      Value: !Ref N8NTaskDefinition
+      Export:
+        Name: ${self:service}-${self:provider.stage}-N8NTaskDefinitionArn
+    N8NFargateServiceName:
+      Description: "Name of the n8n Fargate Service"
+      Value: !GetAtt N8NFargateService.Name # Service name is an attribute
+      Export:
+        Name: ${self:service}-${self:provider.stage}-N8NFargateServiceName
+
+    # ECS Cluster
+    ECSCluster:
+      Type: AWS::ECS::Cluster
+      Properties:
+        ClusterName: ${self:service}-${self:provider.stage}-n8n-cluster
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-cluster
+
+    # CloudWatch Log Group for Fargate Tasks
+    N8NLogGroup:
+      Type: AWS::Logs::LogGroup
+      Properties:
+        LogGroupName: /ecs/${self:service}-${self:provider.stage}/n8n-app
+        RetentionInDays: ${param:logRetentionInDays, 7}
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-log-group
+
+    # Fargate Task Definition for n8n
+    N8NTaskDefinition:
+      Type: AWS::ECS::TaskDefinition
+      Properties:
+        Family: ${self:service}-${self:provider.stage}-n8n-app
+        NetworkMode: awsvpc
+        RequiresCompatibilities:
+          - FARGATE
+        Cpu: ${param:taskCpu, "1024"}
+        Memory: ${param:taskMemory, "2048"}
+        ExecutionRoleArn: !Ref FargateTaskExecutionRole
+        TaskRoleArn: !If [HasOptionalTaskRole, '${param:taskRoleArn}', !Ref "AWS::NoValue"]
+        ContainerDefinitions:
+          - Name: n8n # This name is referenced by the ECS Service LoadBalancer config
+            Image: ${param:n8nImageUrl, "docker.n8n.io/n8nio/n8n:latest"}
+            PortMappings:
+              - ContainerPort: 5678
+                Protocol: tcp
+            LogConfiguration:
+              LogDriver: awslogs
+              Options:
+                awslogs-group: !Ref N8NLogGroup
+                awslogs-region: !Ref AWS::Region
+                awslogs-stream-prefix: ecs-n8n
+            Environment:
+              - Name: NODE_ENV
+                Value: "production"
+              - Name: N8N_HOST
+                Value: ${param:n8nHostName} # User must provide this, e.g., n8n.yourdomain.com
+              - Name: DB_TYPE
+                Value: "postgresdb"
+              - Name: DB_POSTGRESDB_HOST
+                Value: !GetAtt N8NPostgresDBInstance.Endpoint.Address
+              - Name: DB_POSTGRESDB_PORT
+                Value: !GetAtt N8NPostgresDBInstance.Endpoint.Port
+              - Name: DB_POSTGRESDB_DATABASE
+                Value: ${param:dbNameForN8NTask, "n8nDatabase"} # Should match N8NPostgresDBInstance.Properties.DBName
+              - Name: DB_POSTGRESDB_USER
+                Value: ${param:dbUserForN8NTask, "n8nadmin"} # Should match N8NPostgresDBInstance.Properties.MasterUsername
+              - Name: EXECUTIONS_MODE
+                Value: ${param:executionsMode, "queue"}
+              - Name: TZ
+                Value: ${param:timezone, "America/New_York"}
+              - Name: N8N_EMAIL_MODE
+                Value: ${param:emailMode, ""}
+              - Name: N8N_EMAIL_SMTP_HOST
+                Value: ${param:smtpHost, ""}
+              - Name: N8N_EMAIL_SMTP_PORT
+                Value: ${param:smtpPort, "587"}
+              - Name: N8N_EMAIL_SMTP_USER
+                Value: ${param:smtpUser, ""}
+              - Name: N8N_EMAIL_SMTP_SENDER
+                Value: ${param:smtpSender, ""}
+            Secrets:
+              - Name: DB_POSTGRESDB_PASSWORD
+                ValueFrom: !Ref N8NDBPasswordSecret # ARN of the RDS master password secret (created by this template)
+              - Name: N8N_ENCRYPTION_KEY
+                ValueFrom: !Ref N8NEncryptionKeySecret # ARN of the n8n encryption key secret (created by this template)
+              - Name: N8N_EMAIL_SMTP_PASSWORD
+                ValueFrom: !If [HasSmtpPasswordSecret, '${param:smtpPasswordSecretArnForTask}', !Ref "AWS::NoValue"]
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-task-def
+
+    # ECS Service for n8n on Fargate
+    N8NFargateService:
+      Type: AWS::ECS::Service
+      Properties:
+        ServiceName: ${self:service}-${self:provider.stage}-n8n-service
+        Cluster: !Ref ECSCluster
+        TaskDefinition: !Ref N8NTaskDefinition
+        DesiredCount: ${param:desiredTasks, 2}
+        LaunchType: FARGATE
+        NetworkConfiguration:
+          AwsvpcConfiguration:
+            Subnets:
+              - !Ref PrivateSubnet1
+              - !Ref PrivateSubnet2
+            SecurityGroups:
+              - !Ref FargateServiceSecurityGroup
+            AssignPublicIp: DISABLED # Corrected
+        LoadBalancers:
+          - TargetGroupArn: !Ref ALBTargetGroup
+            ContainerName: "n8n" # Must match name in TaskDefinition.ContainerDefinitions
+            ContainerPort: 5678
+        EnableECSManagedTags: true
+        PropagateTags: SERVICE
+        DeploymentConfiguration:
+          MinimumHealthyPercent: 50
+          MaximumPercent: 200
+        HealthCheckGracePeriodSeconds: ${param:healthCheckGracePeriodSeconds, 60}
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-fargate-service
+      DependsOn:
+        - ALBListenerHTTPS # Ensure listener is ready before service tries to register
+
+    # Auto Scaling for Fargate Service
+    N8NServiceScalableTarget:
+      Type: AWS::ApplicationAutoScaling::ScalableTarget
+      Properties:
+        ServiceNamespace: ecs
+        ResourceId: !Join ['', ['service/', !Ref ECSCluster, '/', !GetAtt N8NFargateService.Name]]
+        ScalableDimension: ecs:service:DesiredCount
+        MinCapacity: ${param:minTasks, 2}
+        MaxCapacity: ${param:maxTasks, 4}
+
+    N8NServiceCpuScalingPolicy:
+      Type: AWS::ApplicationAutoScaling::ScalingPolicy
+      Properties:
+        PolicyName: ${self:service}-${self:provider.stage}-n8n-cpu-scaling
+        PolicyType: TargetTrackingScaling
+        ScalingTargetId: !Ref N8NServiceScalableTarget
+        TargetTrackingScalingPolicyConfiguration:
+          TargetValue: 75.0
+          ScaleInCooldown: 300
+          ScaleOutCooldown: 60
+          PredefinedMetricSpecification:
+            PredefinedMetricType: ECSServiceAverageCPUUtilization
+
+    N8NServiceMemoryScalingPolicy:
+      Type: AWS::ApplicationAutoScaling::ScalingPolicy
+      Properties:
+        PolicyName: ${self:service}-${self:provider.stage}-n8n-memory-scaling
+        PolicyType: TargetTrackingScaling
+        ScalingTargetId: !Ref N8NServiceScalableTarget
+        TargetTrackingScalingPolicyConfiguration:
+          TargetValue: 75.0
+          ScaleInCooldown: 300
+          ScaleOutCooldown: 60
+          PredefinedMetricSpecification:
+            PredefinedMetricType: ECSServiceAverageMemoryUtilization
+    ECSClusterName:
+      Description: "Name of the ECS Cluster"
+      Value: !Ref ECSCluster
+      Export:
+        Name: ${self:service}-${self:provider.stage}-ECSClusterName
+    N8NTaskDefinitionArn:
+      Description: "ARN of the n8n Task Definition"
+      Value: !Ref N8NTaskDefinition
+      Export:
+        Name: ${self:service}-${self:provider.stage}-N8NTaskDefinitionArn
+    N8NFargateServiceName:
+      Description: "Name of the n8n Fargate Service"
+      Value: !GetAtt N8NFargateService.Name # Service name is an attribute
+      Export:
+        Name: ${self:service}-${self:provider.stage}-N8NFargateServiceName
+
+    # ECS Cluster
+    ECSCluster:
+      Type: AWS::ECS::Cluster
+      Properties:
+        ClusterName: ${self:service}-${self:provider.stage}-n8n-cluster
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-cluster
+
+    # CloudWatch Log Group for Fargate Tasks
+    N8NLogGroup:
+      Type: AWS::Logs::LogGroup
+      Properties:
+        LogGroupName: /ecs/${self:service}-${self:provider.stage}/n8n-app
+        RetentionInDays: ${param:logRetentionInDays, 7}
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-log-group
+
+    # Fargate Task Definition for n8n
+    N8NTaskDefinition:
+      Type: AWS::ECS::TaskDefinition
+      Properties:
+        Family: ${self:service}-${self:provider.stage}-n8n-app
+        NetworkMode: awsvpc
+        RequiresCompatibilities:
+          - FARGATE
+        Cpu: ${param:taskCpu, "1024"}
+        Memory: ${param:taskMemory, "2048"}
+        ExecutionRoleArn: !Ref FargateTaskExecutionRole
+        TaskRoleArn: !If [HasOptionalTaskRole, '${param:taskRoleArn}', !Ref "AWS::NoValue"]
+        ContainerDefinitions:
+          - Name: n8n # This name is referenced by the ECS Service LoadBalancer config
+            Image: ${param:n8nImageUrl, "docker.n8n.io/n8nio/n8n:latest"}
+            PortMappings:
+              - ContainerPort: 5678
+                Protocol: tcp
+            LogConfiguration:
+              LogDriver: awslogs
+              Options:
+                awslogs-group: !Ref N8NLogGroup
+                awslogs-region: !Ref AWS::Region
+                awslogs-stream-prefix: ecs-n8n
+            Environment:
+              - Name: NODE_ENV
+                Value: "production"
+              - Name: N8N_HOST
+                Value: ${param:n8nHostName} # User must provide this, e.g., n8n.yourdomain.com
+              - Name: DB_TYPE
+                Value: "postgresdb"
+              - Name: DB_POSTGRESDB_HOST
+                Value: !GetAtt N8NPostgresDBInstance.Endpoint.Address
+              - Name: DB_POSTGRESDB_PORT
+                Value: !GetAtt N8NPostgresDBInstance.Endpoint.Port
+              - Name: DB_POSTGRESDB_DATABASE
+                Value: ${param:dbNameForN8NTask, "n8nDatabase"} # Should match N8NPostgresDBInstance.Properties.DBName
+              - Name: DB_POSTGRESDB_USER
+                Value: ${param:dbUserForN8NTask, "n8nadmin"} # Should match N8NPostgresDBInstance.Properties.MasterUsername
+              - Name: EXECUTIONS_MODE
+                Value: ${param:executionsMode, "queue"}
+              - Name: TZ
+                Value: ${param:timezone, "America/New_York"}
+              - Name: N8N_EMAIL_MODE
+                Value: ${param:emailMode, ""}
+              - Name: N8N_EMAIL_SMTP_HOST
+                Value: ${param:smtpHost, ""}
+              - Name: N8N_EMAIL_SMTP_PORT
+                Value: ${param:smtpPort, "587"}
+              - Name: N8N_EMAIL_SMTP_USER
+                Value: ${param:smtpUser, ""}
+              - Name: N8N_EMAIL_SMTP_SENDER
+                Value: ${param:smtpSender, ""}
+            Secrets:
+              - Name: DB_POSTGRESDB_PASSWORD
+                ValueFrom: !Ref N8NDBPasswordSecret # ARN of the RDS master password secret (created by this template)
+              - Name: N8N_ENCRYPTION_KEY
+                ValueFrom: !Ref N8NEncryptionKeySecret # ARN of the n8n encryption key secret (created by this template)
+              - Name: N8N_EMAIL_SMTP_PASSWORD
+                ValueFrom: !If [HasSmtpPasswordSecret, '${param:smtpPasswordSecretArnForTask}', !Ref "AWS::NoValue"]
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-task-def
+
+    # ECS Service for n8n on Fargate
+    N8NFargateService:
+      Type: AWS::ECS::Service
+      Properties:
+        ServiceName: ${self:service}-${self:provider.stage}-n8n-service
+        Cluster: !Ref ECSCluster
+        TaskDefinition: !Ref N8NTaskDefinition
+        DesiredCount: ${param:desiredTasks, 2}
+        LaunchType: FARGATE
+        NetworkConfiguration:
+          AwsvpcConfiguration:
+            Subnets:
+              - !Ref PrivateSubnet1
+              - !Ref PrivateSubnet2
+            SecurityGroups:
+              - !Ref FargateServiceSecurityGroup
+            AssignPublicIp: DISABLED # Corrected
+        LoadBalancers:
+          - TargetGroupArn: !Ref ALBTargetGroup
+            ContainerName: "n8n" # Must match name in TaskDefinition.ContainerDefinitions
+            ContainerPort: 5678
+        EnableECSManagedTags: true
+        PropagateTags: SERVICE
+        DeploymentConfiguration:
+          MinimumHealthyPercent: 50
+          MaximumPercent: 200
+        HealthCheckGracePeriodSeconds: ${param:healthCheckGracePeriodSeconds, 60}
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-fargate-service
+      DependsOn:
+        - ALBListenerHTTPS # Ensure listener is ready before service tries to register
+
+    # Auto Scaling for Fargate Service
+    N8NServiceScalableTarget:
+      Type: AWS::ApplicationAutoScaling::ScalableTarget
+      Properties:
+        ServiceNamespace: ecs
+        ResourceId: !Join ['', ['service/', !Ref ECSCluster, '/', !GetAtt N8NFargateService.Name]]
+        ScalableDimension: ecs:service:DesiredCount
+        MinCapacity: ${param:minTasks, 2}
+        MaxCapacity: ${param:maxTasks, 4}
+
+    N8NServiceCpuScalingPolicy:
+      Type: AWS::ApplicationAutoScaling::ScalingPolicy
+      Properties:
+        PolicyName: ${self:service}-${self:provider.stage}-n8n-cpu-scaling
+        PolicyType: TargetTrackingScaling
+        ScalingTargetId: !Ref N8NServiceScalableTarget
+        TargetTrackingScalingPolicyConfiguration:
+          TargetValue: 75.0
+          ScaleInCooldown: 300
+          ScaleOutCooldown: 60
+          PredefinedMetricSpecification:
+            PredefinedMetricType: ECSServiceAverageCPUUtilization
+
+    N8NServiceMemoryScalingPolicy:
+      Type: AWS::ApplicationAutoScaling::ScalingPolicy
+      Properties:
+        PolicyName: ${self:service}-${self:provider.stage}-n8n-memory-scaling
+        PolicyType: TargetTrackingScaling
+        ScalingTargetId: !Ref N8NServiceScalableTarget
+        TargetTrackingScalingPolicyConfiguration:
+          TargetValue: 75.0
+          ScaleInCooldown: 300
+          ScaleOutCooldown: 60
+          PredefinedMetricSpecification:
+            PredefinedMetricType: ECSServiceAverageMemoryUtilization
+    ECSClusterName:
+      Description: "Name of the ECS Cluster"
+      Value: !Ref ECSCluster
+      Export:
+        Name: ${self:service}-${self:provider.stage}-ECSClusterName
+    N8NTaskDefinitionArn:
+      Description: "ARN of the n8n Task Definition"
+      Value: !Ref N8NTaskDefinition
+      Export:
+        Name: ${self:service}-${self:provider.stage}-N8NTaskDefinitionArn
+    N8NFargateServiceName:
+      Description: "Name of the n8n Fargate Service"
+      Value: !GetAtt N8NFargateService.Name # Service name is an attribute
+      Export:
+        Name: ${self:service}-${self:provider.stage}-N8NFargateServiceName
+
+    # ECS Cluster
+    ECSCluster:
+      Type: AWS::ECS::Cluster
+      Properties:
+        ClusterName: ${self:service}-${self:provider.stage}-n8n-cluster
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-cluster
+
+    # CloudWatch Log Group for Fargate Tasks
+    N8NLogGroup:
+      Type: AWS::Logs::LogGroup
+      Properties:
+        LogGroupName: /ecs/${self:service}-${self:provider.stage}/n8n-app
+        RetentionInDays: ${param:logRetentionInDays, 7}
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-log-group
+
+    # Fargate Task Definition for n8n
+    N8NTaskDefinition:
+      Type: AWS::ECS::TaskDefinition
+      Properties:
+        Family: ${self:service}-${self:provider.stage}-n8n-app
+        NetworkMode: awsvpc
+        RequiresCompatibilities:
+          - FARGATE
+        Cpu: ${param:taskCpu, "1024"}
+        Memory: ${param:taskMemory, "2048"}
+        ExecutionRoleArn: !Ref FargateTaskExecutionRole
+        TaskRoleArn: !If [HasOptionalTaskRole, '${param:taskRoleArn}', !Ref "AWS::NoValue"]
+        ContainerDefinitions:
+          - Name: n8n # This name is referenced by the ECS Service LoadBalancer config
+            Image: ${param:n8nImageUrl, "docker.n8n.io/n8nio/n8n:latest"}
+            PortMappings:
+              - ContainerPort: 5678
+                Protocol: tcp
+            LogConfiguration:
+              LogDriver: awslogs
+              Options:
+                awslogs-group: !Ref N8NLogGroup
+                awslogs-region: !Ref AWS::Region
+                awslogs-stream-prefix: ecs-n8n
+            Environment:
+              - Name: NODE_ENV
+                Value: "production"
+              - Name: N8N_HOST
+                Value: ${param:n8nHostName} # User must provide this, e.g., n8n.yourdomain.com
+              - Name: DB_TYPE
+                Value: "postgresdb"
+              - Name: DB_POSTGRESDB_HOST
+                Value: !GetAtt N8NPostgresDBInstance.Endpoint.Address
+              - Name: DB_POSTGRESDB_PORT
+                Value: !GetAtt N8NPostgresDBInstance.Endpoint.Port
+              - Name: DB_POSTGRESDB_DATABASE
+                Value: ${param:dbNameForN8NTask, "n8nDatabase"} # Should match N8NPostgresDBInstance.Properties.DBName
+              - Name: DB_POSTGRESDB_USER
+                Value: ${param:dbUserForN8NTask, "n8nadmin"} # Should match N8NPostgresDBInstance.Properties.MasterUsername
+              - Name: EXECUTIONS_MODE
+                Value: ${param:executionsMode, "queue"}
+              - Name: TZ
+                Value: ${param:timezone, "America/New_York"}
+              - Name: N8N_EMAIL_MODE
+                Value: ${param:emailMode, ""}
+              - Name: N8N_EMAIL_SMTP_HOST
+                Value: ${param:smtpHost, ""}
+              - Name: N8N_EMAIL_SMTP_PORT
+                Value: ${param:smtpPort, "587"}
+              - Name: N8N_EMAIL_SMTP_USER
+                Value: ${param:smtpUser, ""}
+              - Name: N8N_EMAIL_SMTP_SENDER
+                Value: ${param:smtpSender, ""}
+            Secrets:
+              - Name: DB_POSTGRESDB_PASSWORD
+                ValueFrom: !Ref N8NDBPasswordSecret # ARN of the RDS master password secret (created by this template)
+              - Name: N8N_ENCRYPTION_KEY
+                ValueFrom: !Ref N8NEncryptionKeySecret # ARN of the n8n encryption key secret (created by this template)
+              - Name: N8N_EMAIL_SMTP_PASSWORD
+                ValueFrom: !If [HasSmtpPasswordSecret, '${param:smtpPasswordSecretArnForTask}', !Ref "AWS::NoValue"]
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-task-def
+
+    # ECS Service for n8n on Fargate
+    N8NFargateService:
+      Type: AWS::ECS::Service
+      Properties:
+        ServiceName: ${self:service}-${self:provider.stage}-n8n-service
+        Cluster: !Ref ECSCluster
+        TaskDefinition: !Ref N8NTaskDefinition
+        DesiredCount: ${param:desiredTasks, 2}
+        LaunchType: FARGATE
+        NetworkConfiguration:
+          AwsvpcConfiguration:
+            Subnets:
+              - !Ref PrivateSubnet1
+              - !Ref PrivateSubnet2
+            SecurityGroups:
+              - !Ref FargateServiceSecurityGroup
+            AssignPublicIp: DISABLED # Corrected
+        LoadBalancers:
+          - TargetGroupArn: !Ref ALBTargetGroup
+            ContainerName: "n8n" # Must match name in TaskDefinition.ContainerDefinitions
+            ContainerPort: 5678
+        EnableECSManagedTags: true
+        PropagateTags: SERVICE
+        DeploymentConfiguration:
+          MinimumHealthyPercent: 50
+          MaximumPercent: 200
+        HealthCheckGracePeriodSeconds: ${param:healthCheckGracePeriodSeconds, 60}
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-fargate-service
+      DependsOn:
+        - ALBListenerHTTPS # Ensure listener is ready before service tries to register
+
+    # Auto Scaling for Fargate Service
+    N8NServiceScalableTarget:
+      Type: AWS::ApplicationAutoScaling::ScalableTarget
+      Properties:
+        ServiceNamespace: ecs
+        ResourceId: !Join ['', ['service/', !Ref ECSCluster, '/', !GetAtt N8NFargateService.Name]]
+        ScalableDimension: ecs:service:DesiredCount
+        MinCapacity: ${param:minTasks, 2}
+        MaxCapacity: ${param:maxTasks, 4}
+
+    N8NServiceCpuScalingPolicy:
+      Type: AWS::ApplicationAutoScaling::ScalingPolicy
+      Properties:
+        PolicyName: ${self:service}-${self:provider.stage}-n8n-cpu-scaling
+        PolicyType: TargetTrackingScaling
+        ScalingTargetId: !Ref N8NServiceScalableTarget
+        TargetTrackingScalingPolicyConfiguration:
+          TargetValue: 75.0
+          ScaleInCooldown: 300
+          ScaleOutCooldown: 60
+          PredefinedMetricSpecification:
+            PredefinedMetricType: ECSServiceAverageCPUUtilization
+
+    N8NServiceMemoryScalingPolicy:
+      Type: AWS::ApplicationAutoScaling::ScalingPolicy
+      Properties:
+        PolicyName: ${self:service}-${self:provider.stage}-n8n-memory-scaling
+        PolicyType: TargetTrackingScaling
+        ScalingTargetId: !Ref N8NServiceScalableTarget
+        TargetTrackingScalingPolicyConfiguration:
+          TargetValue: 75.0
+          ScaleInCooldown: 300
+          ScaleOutCooldown: 60
+          PredefinedMetricSpecification:
+            PredefinedMetricType: ECSServiceAverageMemoryUtilization
+    ECSClusterName:
+      Description: "Name of the ECS Cluster"
+      Value: !Ref ECSCluster
+      Export:
+        Name: ${self:service}-${self:provider.stage}-ECSClusterName
+    N8NTaskDefinitionArn:
+      Description: "ARN of the n8n Task Definition"
+      Value: !Ref N8NTaskDefinition
+      Export:
+        Name: ${self:service}-${self:provider.stage}-N8NTaskDefinitionArn
+    N8NFargateServiceName:
+      Description: "Name of the n8n Fargate Service"
+      Value: !GetAtt N8NFargateService.Name # Service name is an attribute
+      Export:
+        Name: ${self:service}-${self:provider.stage}-N8NFargateServiceName
+
+    # ECS Cluster
+    ECSCluster:
+      Type: AWS::ECS::Cluster
+      Properties:
+        ClusterName: ${self:service}-${self:provider.stage}-n8n-cluster
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-cluster
+
+    # CloudWatch Log Group for Fargate Tasks
+    N8NLogGroup:
+      Type: AWS::Logs::LogGroup
+      Properties:
+        LogGroupName: /ecs/${self:service}-${self:provider.stage}/n8n-app
+        RetentionInDays: ${param:logRetentionInDays, 7}
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-log-group
+
+    # Fargate Task Definition for n8n
+    N8NTaskDefinition:
+      Type: AWS::ECS::TaskDefinition
+      Properties:
+        Family: ${self:service}-${self:provider.stage}-n8n-app
+        NetworkMode: awsvpc
+        RequiresCompatibilities:
+          - FARGATE
+        Cpu: ${param:taskCpu, "1024"}
+        Memory: ${param:taskMemory, "2048"}
+        ExecutionRoleArn: !Ref FargateTaskExecutionRole
+        TaskRoleArn: !If [HasOptionalTaskRole, '${param:taskRoleArn}', !Ref "AWS::NoValue"]
+        ContainerDefinitions:
+          - Name: n8n # This name is referenced by the ECS Service LoadBalancer config
+            Image: ${param:n8nImageUrl, "docker.n8n.io/n8nio/n8n:latest"}
+            PortMappings:
+              - ContainerPort: 5678
+                Protocol: tcp
+            LogConfiguration:
+              LogDriver: awslogs
+              Options:
+                awslogs-group: !Ref N8NLogGroup
+                awslogs-region: !Ref AWS::Region
+                awslogs-stream-prefix: ecs-n8n
+            Environment:
+              - Name: NODE_ENV
+                Value: "production"
+              - Name: N8N_HOST
+                Value: ${param:n8nHostName} # User must provide this, e.g., n8n.yourdomain.com
+              - Name: DB_TYPE
+                Value: "postgresdb"
+              - Name: DB_POSTGRESDB_HOST
+                Value: !GetAtt N8NPostgresDBInstance.Endpoint.Address
+              - Name: DB_POSTGRESDB_PORT
+                Value: !GetAtt N8NPostgresDBInstance.Endpoint.Port
+              - Name: DB_POSTGRESDB_DATABASE
+                Value: ${param:dbNameForN8NTask, "n8nDatabase"} # Should match N8NPostgresDBInstance.Properties.DBName
+              - Name: DB_POSTGRESDB_USER
+                Value: ${param:dbUserForN8NTask, "n8nadmin"} # Should match N8NPostgresDBInstance.Properties.MasterUsername
+              - Name: EXECUTIONS_MODE
+                Value: ${param:executionsMode, "queue"}
+              - Name: TZ
+                Value: ${param:timezone, "America/New_York"}
+              - Name: N8N_EMAIL_MODE
+                Value: ${param:emailMode, ""}
+              - Name: N8N_EMAIL_SMTP_HOST
+                Value: ${param:smtpHost, ""}
+              - Name: N8N_EMAIL_SMTP_PORT
+                Value: ${param:smtpPort, "587"}
+              - Name: N8N_EMAIL_SMTP_USER
+                Value: ${param:smtpUser, ""}
+              - Name: N8N_EMAIL_SMTP_SENDER
+                Value: ${param:smtpSender, ""}
+            Secrets:
+              - Name: DB_POSTGRESDB_PASSWORD
+                ValueFrom: !Ref N8NDBPasswordSecret # ARN of the RDS master password secret (created by this template)
+              - Name: N8N_ENCRYPTION_KEY
+                ValueFrom: !Ref N8NEncryptionKeySecret # ARN of the n8n encryption key secret (created by this template)
+              - Name: N8N_EMAIL_SMTP_PASSWORD
+                ValueFrom: !If [HasSmtpPasswordSecret, '${param:smtpPasswordSecretArnForTask}', !Ref "AWS::NoValue"]
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-task-def
+
+    # ECS Service for n8n on Fargate
+    N8NFargateService:
+      Type: AWS::ECS::Service
+      Properties:
+        ServiceName: ${self:service}-${self:provider.stage}-n8n-service
+        Cluster: !Ref ECSCluster
+        TaskDefinition: !Ref N8NTaskDefinition
+        DesiredCount: ${param:desiredTasks, 2}
+        LaunchType: FARGATE
+        NetworkConfiguration:
+          AwsvpcConfiguration:
+            Subnets:
+              - !Ref PrivateSubnet1
+              - !Ref PrivateSubnet2
+            SecurityGroups:
+              - !Ref FargateServiceSecurityGroup
+            AssignPublicIp: DISABLED # Corrected
+        LoadBalancers:
+          - TargetGroupArn: !Ref ALBTargetGroup
+            ContainerName: "n8n" # Must match name in TaskDefinition.ContainerDefinitions
+            ContainerPort: 5678
+        EnableECSManagedTags: true
+        PropagateTags: SERVICE
+        DeploymentConfiguration:
+          MinimumHealthyPercent: 50
+          MaximumPercent: 200
+        HealthCheckGracePeriodSeconds: ${param:healthCheckGracePeriodSeconds, 60}
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-fargate-service
+      DependsOn:
+        - ALBListenerHTTPS # Ensure listener is ready before service tries to register
+
+    # Auto Scaling for Fargate Service
+    N8NServiceScalableTarget:
+      Type: AWS::ApplicationAutoScaling::ScalableTarget
+      Properties:
+        ServiceNamespace: ecs
+        ResourceId: !Join ['', ['service/', !Ref ECSCluster, '/', !GetAtt N8NFargateService.Name]]
+        ScalableDimension: ecs:service:DesiredCount
+        MinCapacity: ${param:minTasks, 2}
+        MaxCapacity: ${param:maxTasks, 4}
+
+    N8NServiceCpuScalingPolicy:
+      Type: AWS::ApplicationAutoScaling::ScalingPolicy
+      Properties:
+        PolicyName: ${self:service}-${self:provider.stage}-n8n-cpu-scaling
+        PolicyType: TargetTrackingScaling
+        ScalingTargetId: !Ref N8NServiceScalableTarget
+        TargetTrackingScalingPolicyConfiguration:
+          TargetValue: 75.0
+          ScaleInCooldown: 300
+          ScaleOutCooldown: 60
+          PredefinedMetricSpecification:
+            PredefinedMetricType: ECSServiceAverageCPUUtilization
+
+    N8NServiceMemoryScalingPolicy:
+      Type: AWS::ApplicationAutoScaling::ScalingPolicy
+      Properties:
+        PolicyName: ${self:service}-${self:provider.stage}-n8n-memory-scaling
+        PolicyType: TargetTrackingScaling
+        ScalingTargetId: !Ref N8NServiceScalableTarget
+        TargetTrackingScalingPolicyConfiguration:
+          TargetValue: 75.0
+          ScaleInCooldown: 300
+          ScaleOutCooldown: 60
+          PredefinedMetricSpecification:
+            PredefinedMetricType: ECSServiceAverageMemoryUtilization
+    ECSClusterName:
+      Description: "Name of the ECS Cluster"
+      Value: !Ref ECSCluster
+      Export:
+        Name: ${self:service}-${self:provider.stage}-ECSClusterName
+    N8NTaskDefinitionArn:
+      Description: "ARN of the n8n Task Definition"
+      Value: !Ref N8NTaskDefinition
+      Export:
+        Name: ${self:service}-${self:provider.stage}-N8NTaskDefinitionArn
+    N8NFargateServiceName:
+      Description: "Name of the n8n Fargate Service"
+      Value: !GetAtt N8NFargateService.Name # Service name is an attribute
+      Export:
+        Name: ${self:service}-${self:provider.stage}-N8NFargateServiceName
+
+    # ECS Cluster
+    ECSCluster:
+      Type: AWS::ECS::Cluster
+      Properties:
+        ClusterName: ${self:service}-${self:provider.stage}-n8n-cluster
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-cluster
+
+    # CloudWatch Log Group for Fargate Tasks
+    N8NLogGroup:
+      Type: AWS::Logs::LogGroup
+      Properties:
+        LogGroupName: /ecs/${self:service}-${self:provider.stage}/n8n-app
+        RetentionInDays: ${param:logRetentionInDays, 7}
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-log-group
+
+    # Fargate Task Definition for n8n
+    N8NTaskDefinition:
+      Type: AWS::ECS::TaskDefinition
+      Properties:
+        Family: ${self:service}-${self:provider.stage}-n8n-app
+        NetworkMode: awsvpc
+        RequiresCompatibilities:
+          - FARGATE
+        Cpu: ${param:taskCpu, "1024"}
+        Memory: ${param:taskMemory, "2048"}
+        ExecutionRoleArn: !Ref FargateTaskExecutionRole
+        TaskRoleArn: !If [HasOptionalTaskRole, '${param:taskRoleArn}', !Ref "AWS::NoValue"]
+        ContainerDefinitions:
+          - Name: n8n # This name is referenced by the ECS Service LoadBalancer config
+            Image: ${param:n8nImageUrl, "docker.n8n.io/n8nio/n8n:latest"}
+            PortMappings:
+              - ContainerPort: 5678
+                Protocol: tcp
+            LogConfiguration:
+              LogDriver: awslogs
+              Options:
+                awslogs-group: !Ref N8NLogGroup
+                awslogs-region: !Ref AWS::Region
+                awslogs-stream-prefix: ecs-n8n
+            Environment:
+              - Name: NODE_ENV
+                Value: "production"
+              - Name: N8N_HOST
+                Value: ${param:n8nHostName} # User must provide this, e.g., n8n.yourdomain.com
+              - Name: DB_TYPE
+                Value: "postgresdb"
+              - Name: DB_POSTGRESDB_HOST
+                Value: !GetAtt N8NPostgresDBInstance.Endpoint.Address
+              - Name: DB_POSTGRESDB_PORT
+                Value: !GetAtt N8NPostgresDBInstance.Endpoint.Port
+              - Name: DB_POSTGRESDB_DATABASE
+                Value: ${param:dbNameForN8NTask, "n8nDatabase"} # Should match N8NPostgresDBInstance.Properties.DBName
+              - Name: DB_POSTGRESDB_USER
+                Value: ${param:dbUserForN8NTask, "n8nadmin"} # Should match N8NPostgresDBInstance.Properties.MasterUsername
+              - Name: EXECUTIONS_MODE
+                Value: ${param:executionsMode, "queue"}
+              - Name: TZ
+                Value: ${param:timezone, "America/New_York"}
+              - Name: N8N_EMAIL_MODE
+                Value: ${param:emailMode, ""}
+              - Name: N8N_EMAIL_SMTP_HOST
+                Value: ${param:smtpHost, ""}
+              - Name: N8N_EMAIL_SMTP_PORT
+                Value: ${param:smtpPort, "587"}
+              - Name: N8N_EMAIL_SMTP_USER
+                Value: ${param:smtpUser, ""}
+              - Name: N8N_EMAIL_SMTP_SENDER
+                Value: ${param:smtpSender, ""}
+            Secrets:
+              - Name: DB_POSTGRESDB_PASSWORD
+                ValueFrom: !Ref N8NDBPasswordSecret # ARN of the RDS master password secret (created by this template)
+              - Name: N8N_ENCRYPTION_KEY
+                ValueFrom: !Ref N8NEncryptionKeySecret # ARN of the n8n encryption key secret (created by this template)
+              - Name: N8N_EMAIL_SMTP_PASSWORD
+                ValueFrom: !If [HasSmtpPasswordSecret, '${param:smtpPasswordSecretArnForTask}', !Ref "AWS::NoValue"]
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-task-def
+
+    # ECS Service for n8n on Fargate
+    N8NFargateService:
+      Type: AWS::ECS::Service
+      Properties:
+        ServiceName: ${self:service}-${self:provider.stage}-n8n-service
+        Cluster: !Ref ECSCluster
+        TaskDefinition: !Ref N8NTaskDefinition
+        DesiredCount: ${param:desiredTasks, 2}
+        LaunchType: FARGATE
+        NetworkConfiguration:
+          AwsvpcConfiguration:
+            Subnets:
+              - !Ref PrivateSubnet1
+              - !Ref PrivateSubnet2
+            SecurityGroups:
+              - !Ref FargateServiceSecurityGroup
+            AssignPublicIp: DISABLED # Corrected
+        LoadBalancers:
+          - TargetGroupArn: !Ref ALBTargetGroup
+            ContainerName: "n8n" # Must match name in TaskDefinition.ContainerDefinitions
+            ContainerPort: 5678
+        EnableECSManagedTags: true
+        PropagateTags: SERVICE
+        DeploymentConfiguration:
+          MinimumHealthyPercent: 50
+          MaximumPercent: 200
+        HealthCheckGracePeriodSeconds: ${param:healthCheckGracePeriodSeconds, 60}
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-fargate-service
+      DependsOn:
+        - ALBListenerHTTPS # Ensure listener is ready before service tries to register
+
+    # Auto Scaling for Fargate Service
+    N8NServiceScalableTarget:
+      Type: AWS::ApplicationAutoScaling::ScalableTarget
+      Properties:
+        ServiceNamespace: ecs
+        ResourceId: !Join ['', ['service/', !Ref ECSCluster, '/', !GetAtt N8NFargateService.Name]]
+        ScalableDimension: ecs:service:DesiredCount
+        MinCapacity: ${param:minTasks, 2}
+        MaxCapacity: ${param:maxTasks, 4}
+
+    N8NServiceCpuScalingPolicy:
+      Type: AWS::ApplicationAutoScaling::ScalingPolicy
+      Properties:
+        PolicyName: ${self:service}-${self:provider.stage}-n8n-cpu-scaling
+        PolicyType: TargetTrackingScaling
+        ScalingTargetId: !Ref N8NServiceScalableTarget
+        TargetTrackingScalingPolicyConfiguration:
+          TargetValue: 75.0
+          ScaleInCooldown: 300
+          ScaleOutCooldown: 60
+          PredefinedMetricSpecification:
+            PredefinedMetricType: ECSServiceAverageCPUUtilization
+
+    N8NServiceMemoryScalingPolicy:
+      Type: AWS::ApplicationAutoScaling::ScalingPolicy
+      Properties:
+        PolicyName: ${self:service}-${self:provider.stage}-n8n-memory-scaling
+        PolicyType: TargetTrackingScaling
+        ScalingTargetId: !Ref N8NServiceScalableTarget
+        TargetTrackingScalingPolicyConfiguration:
+          TargetValue: 75.0
+          ScaleInCooldown: 300
+          ScaleOutCooldown: 60
+          PredefinedMetricSpecification:
+            PredefinedMetricType: ECSServiceAverageMemoryUtilization
+    ECSClusterName:
+      Description: "Name of the ECS Cluster"
+      Value: !Ref ECSCluster
+      Export:
+        Name: ${self:service}-${self:provider.stage}-ECSClusterName
+    N8NTaskDefinitionArn:
+      Description: "ARN of the n8n Task Definition"
+      Value: !Ref N8NTaskDefinition
+      Export:
+        Name: ${self:service}-${self:provider.stage}-N8NTaskDefinitionArn
+    N8NFargateServiceName:
+      Description: "Name of the n8n Fargate Service"
+      Value: !GetAtt N8NFargateService.Name # Service name is an attribute
+      Export:
+        Name: ${self:service}-${self:provider.stage}-N8NFargateServiceName
+
+    # ECS Cluster
+    ECSCluster:
+      Type: AWS::ECS::Cluster
+      Properties:
+        ClusterName: ${self:service}-${self:provider.stage}-n8n-cluster
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-cluster
+
+    # CloudWatch Log Group for Fargate Tasks
+    N8NLogGroup:
+      Type: AWS::Logs::LogGroup
+      Properties:
+        LogGroupName: /ecs/${self:service}-${self:provider.stage}/n8n-app
+        RetentionInDays: ${param:logRetentionInDays, 7}
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-log-group
+
+    # Fargate Task Definition for n8n
+    N8NTaskDefinition:
+      Type: AWS::ECS::TaskDefinition
+      Properties:
+        Family: ${self:service}-${self:provider.stage}-n8n-app
+        NetworkMode: awsvpc
+        RequiresCompatibilities:
+          - FARGATE
+        Cpu: ${param:taskCpu, "1024"}
+        Memory: ${param:taskMemory, "2048"}
+        ExecutionRoleArn: !Ref FargateTaskExecutionRole
+        TaskRoleArn: !If [HasOptionalTaskRole, '${param:taskRoleArn}', !Ref "AWS::NoValue"]
+        ContainerDefinitions:
+          - Name: n8n # This name is referenced by the ECS Service LoadBalancer config
+            Image: ${param:n8nImageUrl, "docker.n8n.io/n8nio/n8n:latest"}
+            PortMappings:
+              - ContainerPort: 5678
+                Protocol: tcp
+            LogConfiguration:
+              LogDriver: awslogs
+              Options:
+                awslogs-group: !Ref N8NLogGroup
+                awslogs-region: !Ref AWS::Region
+                awslogs-stream-prefix: ecs-n8n
+            Environment:
+              - Name: NODE_ENV
+                Value: "production"
+              - Name: N8N_HOST
+                Value: ${param:n8nHostName} # User must provide this, e.g., n8n.yourdomain.com
+              - Name: DB_TYPE
+                Value: "postgresdb"
+              - Name: DB_POSTGRESDB_HOST
+                Value: !GetAtt N8NPostgresDBInstance.Endpoint.Address
+              - Name: DB_POSTGRESDB_PORT
+                Value: !GetAtt N8NPostgresDBInstance.Endpoint.Port
+              - Name: DB_POSTGRESDB_DATABASE
+                Value: ${param:dbNameForN8NTask, "n8nDatabase"} # Should match N8NPostgresDBInstance.Properties.DBName
+              - Name: DB_POSTGRESDB_USER
+                Value: ${param:dbUserForN8NTask, "n8nadmin"} # Should match N8NPostgresDBInstance.Properties.MasterUsername
+              - Name: EXECUTIONS_MODE
+                Value: ${param:executionsMode, "queue"}
+              - Name: TZ
+                Value: ${param:timezone, "America/New_York"}
+              - Name: N8N_EMAIL_MODE
+                Value: ${param:emailMode, ""}
+              - Name: N8N_EMAIL_SMTP_HOST
+                Value: ${param:smtpHost, ""}
+              - Name: N8N_EMAIL_SMTP_PORT
+                Value: ${param:smtpPort, "587"}
+              - Name: N8N_EMAIL_SMTP_USER
+                Value: ${param:smtpUser, ""}
+              - Name: N8N_EMAIL_SMTP_SENDER
+                Value: ${param:smtpSender, ""}
+            Secrets:
+              - Name: DB_POSTGRESDB_PASSWORD
+                ValueFrom: !Ref N8NDBPasswordSecret # ARN of the RDS master password secret (created by this template)
+              - Name: N8N_ENCRYPTION_KEY
+                ValueFrom: !Ref N8NEncryptionKeySecret # ARN of the n8n encryption key secret (created by this template)
+              - Name: N8N_EMAIL_SMTP_PASSWORD
+                ValueFrom: !If [HasSmtpPasswordSecret, '${param:smtpPasswordSecretArnForTask}', !Ref "AWS::NoValue"]
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-task-def
+
+    # ECS Service for n8n on Fargate
+    N8NFargateService:
+      Type: AWS::ECS::Service
+      Properties:
+        ServiceName: ${self:service}-${self:provider.stage}-n8n-service
+        Cluster: !Ref ECSCluster
+        TaskDefinition: !Ref N8NTaskDefinition
+        DesiredCount: ${param:desiredTasks, 2}
+        LaunchType: FARGATE
+        NetworkConfiguration:
+          AwsvpcConfiguration:
+            Subnets:
+              - !Ref PrivateSubnet1
+              - !Ref PrivateSubnet2
+            SecurityGroups:
+              - !Ref FargateServiceSecurityGroup
+            AssignPublicIp: DISABLED # Corrected
+        LoadBalancers:
+          - TargetGroupArn: !Ref ALBTargetGroup
+            ContainerName: "n8n" # Must match name in TaskDefinition.ContainerDefinitions
+            ContainerPort: 5678
+        EnableECSManagedTags: true
+        PropagateTags: SERVICE
+        DeploymentConfiguration:
+          MinimumHealthyPercent: 50
+          MaximumPercent: 200
+        HealthCheckGracePeriodSeconds: ${param:healthCheckGracePeriodSeconds, 60}
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-fargate-service
+      DependsOn:
+        - ALBListenerHTTPS # Ensure listener is ready before service tries to register
+
+    # Auto Scaling for Fargate Service
+    N8NServiceScalableTarget:
+      Type: AWS::ApplicationAutoScaling::ScalableTarget
+      Properties:
+        ServiceNamespace: ecs
+        ResourceId: !Join ['', ['service/', !Ref ECSCluster, '/', !GetAtt N8NFargateService.Name]]
+        ScalableDimension: ecs:service:DesiredCount
+        MinCapacity: ${param:minTasks, 2}
+        MaxCapacity: ${param:maxTasks, 4}
+
+    N8NServiceCpuScalingPolicy:
+      Type: AWS::ApplicationAutoScaling::ScalingPolicy
+      Properties:
+        PolicyName: ${self:service}-${self:provider.stage}-n8n-cpu-scaling
+        PolicyType: TargetTrackingScaling
+        ScalingTargetId: !Ref N8NServiceScalableTarget
+        TargetTrackingScalingPolicyConfiguration:
+          TargetValue: 75.0
+          ScaleInCooldown: 300
+          ScaleOutCooldown: 60
+          PredefinedMetricSpecification:
+            PredefinedMetricType: ECSServiceAverageCPUUtilization
+
+    N8NServiceMemoryScalingPolicy:
+      Type: AWS::ApplicationAutoScaling::ScalingPolicy
+      Properties:
+        PolicyName: ${self:service}-${self:provider.stage}-n8n-memory-scaling
+        PolicyType: TargetTrackingScaling
+        ScalingTargetId: !Ref N8NServiceScalableTarget
+        TargetTrackingScalingPolicyConfiguration:
+          TargetValue: 75.0
+          ScaleInCooldown: 300
+          ScaleOutCooldown: 60
+          PredefinedMetricSpecification:
+            PredefinedMetricType: ECSServiceAverageMemoryUtilization
+    ECSClusterName:
+      Description: "Name of the ECS Cluster"
+      Value: !Ref ECSCluster
+      Export:
+        Name: ${self:service}-${self:provider.stage}-ECSClusterName
+    N8NTaskDefinitionArn:
+      Description: "ARN of the n8n Task Definition"
+      Value: !Ref N8NTaskDefinition
+      Export:
+        Name: ${self:service}-${self:provider.stage}-N8NTaskDefinitionArn
+    N8NFargateServiceName:
+      Description: "Name of the n8n Fargate Service"
+      Value: !GetAtt N8NFargateService.Name # Service name is an attribute
+      Export:
+        Name: ${self:service}-${self:provider.stage}-N8NFargateServiceName
+
+    # ECS Cluster
+    ECSCluster:
+      Type: AWS::ECS::Cluster
+      Properties:
+        ClusterName: ${self:service}-${self:provider.stage}-n8n-cluster
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-cluster
+
+    # CloudWatch Log Group for Fargate Tasks
+    N8NLogGroup:
+      Type: AWS::Logs::LogGroup
+      Properties:
+        LogGroupName: /ecs/${self:service}-${self:provider.stage}/n8n-app
+        RetentionInDays: ${param:logRetentionInDays, 7}
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-log-group
+
+    # Fargate Task Definition for n8n
+    N8NTaskDefinition:
+      Type: AWS::ECS::TaskDefinition
+      Properties:
+        Family: ${self:service}-${self:provider.stage}-n8n-app
+        NetworkMode: awsvpc
+        RequiresCompatibilities:
+          - FARGATE
+        Cpu: ${param:taskCpu, "1024"}
+        Memory: ${param:taskMemory, "2048"}
+        ExecutionRoleArn: !Ref FargateTaskExecutionRole
+        TaskRoleArn: !If [HasOptionalTaskRole, '${param:taskRoleArn}', !Ref "AWS::NoValue"]
+        ContainerDefinitions:
+          - Name: n8n # This name is referenced by the ECS Service LoadBalancer config
+            Image: ${param:n8nImageUrl, "docker.n8n.io/n8nio/n8n:latest"}
+            PortMappings:
+              - ContainerPort: 5678
+                Protocol: tcp
+            LogConfiguration:
+              LogDriver: awslogs
+              Options:
+                awslogs-group: !Ref N8NLogGroup
+                awslogs-region: !Ref AWS::Region
+                awslogs-stream-prefix: ecs-n8n
+            Environment:
+              - Name: NODE_ENV
+                Value: "production"
+              - Name: N8N_HOST
+                Value: ${param:n8nHostName} # User must provide this, e.g., n8n.yourdomain.com
+              - Name: DB_TYPE
+                Value: "postgresdb"
+              - Name: DB_POSTGRESDB_HOST
+                Value: !GetAtt N8NPostgresDBInstance.Endpoint.Address
+              - Name: DB_POSTGRESDB_PORT
+                Value: !GetAtt N8NPostgresDBInstance.Endpoint.Port
+              - Name: DB_POSTGRESDB_DATABASE
+                Value: ${param:dbNameForN8NTask, "n8nDatabase"} # Should match N8NPostgresDBInstance.Properties.DBName
+              - Name: DB_POSTGRESDB_USER
+                Value: ${param:dbUserForN8NTask, "n8nadmin"} # Should match N8NPostgresDBInstance.Properties.MasterUsername
+              - Name: EXECUTIONS_MODE
+                Value: ${param:executionsMode, "queue"}
+              - Name: TZ
+                Value: ${param:timezone, "America/New_York"}
+              - Name: N8N_EMAIL_MODE
+                Value: ${param:emailMode, ""}
+              - Name: N8N_EMAIL_SMTP_HOST
+                Value: ${param:smtpHost, ""}
+              - Name: N8N_EMAIL_SMTP_PORT
+                Value: ${param:smtpPort, "587"}
+              - Name: N8N_EMAIL_SMTP_USER
+                Value: ${param:smtpUser, ""}
+              - Name: N8N_EMAIL_SMTP_SENDER
+                Value: ${param:smtpSender, ""}
+            Secrets:
+              - Name: DB_POSTGRESDB_PASSWORD
+                ValueFrom: !Ref N8NDBPasswordSecret # ARN of the RDS master password secret (created by this template)
+              - Name: N8N_ENCRYPTION_KEY
+                ValueFrom: !Ref N8NEncryptionKeySecret # ARN of the n8n encryption key secret (created by this template)
+              - Name: N8N_EMAIL_SMTP_PASSWORD
+                ValueFrom: !If [HasSmtpPasswordSecret, '${param:smtpPasswordSecretArnForTask}', !Ref "AWS::NoValue"]
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-task-def
+
+    # ECS Service for n8n on Fargate
+    N8NFargateService:
+      Type: AWS::ECS::Service
+      Properties:
+        ServiceName: ${self:service}-${self:provider.stage}-n8n-service
+        Cluster: !Ref ECSCluster
+        TaskDefinition: !Ref N8NTaskDefinition
+        DesiredCount: ${param:desiredTasks, 2}
+        LaunchType: FARGATE
+        NetworkConfiguration:
+          AwsvpcConfiguration:
+            Subnets:
+              - !Ref PrivateSubnet1
+              - !Ref PrivateSubnet2
+            SecurityGroups:
+              - !Ref FargateServiceSecurityGroup
+            AssignPublicIp: DISABLED # Corrected
+        LoadBalancers:
+          - TargetGroupArn: !Ref ALBTargetGroup
+            ContainerName: "n8n" # Must match name in TaskDefinition.ContainerDefinitions
+            ContainerPort: 5678
+        EnableECSManagedTags: true
+        PropagateTags: SERVICE
+        DeploymentConfiguration:
+          MinimumHealthyPercent: 50
+          MaximumPercent: 200
+        HealthCheckGracePeriodSeconds: ${param:healthCheckGracePeriodSeconds, 60}
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-fargate-service
+      DependsOn:
+        - ALBListenerHTTPS # Ensure listener is ready before service tries to register
+
+    # Auto Scaling for Fargate Service
+    N8NServiceScalableTarget:
+      Type: AWS::ApplicationAutoScaling::ScalableTarget
+      Properties:
+        ServiceNamespace: ecs
+        ResourceId: !Join ['', ['service/', !Ref ECSCluster, '/', !GetAtt N8NFargateService.Name]]
+        ScalableDimension: ecs:service:DesiredCount
+        MinCapacity: ${param:minTasks, 2}
+        MaxCapacity: ${param:maxTasks, 4}
+
+    N8NServiceCpuScalingPolicy:
+      Type: AWS::ApplicationAutoScaling::ScalingPolicy
+      Properties:
+        PolicyName: ${self:service}-${self:provider.stage}-n8n-cpu-scaling
+        PolicyType: TargetTrackingScaling
+        ScalingTargetId: !Ref N8NServiceScalableTarget
+        TargetTrackingScalingPolicyConfiguration:
+          TargetValue: 75.0
+          ScaleInCooldown: 300
+          ScaleOutCooldown: 60
+          PredefinedMetricSpecification:
+            PredefinedMetricType: ECSServiceAverageCPUUtilization
+
+    N8NServiceMemoryScalingPolicy:
+      Type: AWS::ApplicationAutoScaling::ScalingPolicy
+      Properties:
+        PolicyName: ${self:service}-${self:provider.stage}-n8n-memory-scaling
+        PolicyType: TargetTrackingScaling
+        ScalingTargetId: !Ref N8NServiceScalableTarget
+        TargetTrackingScalingPolicyConfiguration:
+          TargetValue: 75.0
+          ScaleInCooldown: 300
+          ScaleOutCooldown: 60
+          PredefinedMetricSpecification:
+            PredefinedMetricType: ECSServiceAverageMemoryUtilization
+    ECSClusterName:
+      Description: "Name of the ECS Cluster"
+      Value: !Ref ECSCluster
+      Export:
+        Name: ${self:service}-${self:provider.stage}-ECSClusterName
+    N8NTaskDefinitionArn:
+      Description: "ARN of the n8n Task Definition"
+      Value: !Ref N8NTaskDefinition
+      Export:
+        Name: ${self:service}-${self:provider.stage}-N8NTaskDefinitionArn
+    N8NFargateServiceName:
+      Description: "Name of the n8n Fargate Service"
+      Value: !GetAtt N8NFargateService.Name # Service name is an attribute
+      Export:
+        Name: ${self:service}-${self:provider.stage}-N8NFargateServiceName
+
+    # ECS Cluster
+    ECSCluster:
+      Type: AWS::ECS::Cluster
+      Properties:
+        ClusterName: ${self:service}-${self:provider.stage}-n8n-cluster
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-cluster
+
+    # CloudWatch Log Group for Fargate Tasks
+    N8NLogGroup:
+      Type: AWS::Logs::LogGroup
+      Properties:
+        LogGroupName: /ecs/${self:service}-${self:provider.stage}/n8n-app
+        RetentionInDays: ${param:logRetentionInDays, 7}
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-log-group
+
+    # Fargate Task Definition for n8n
+    N8NTaskDefinition:
+      Type: AWS::ECS::TaskDefinition
+      Properties:
+        Family: ${self:service}-${self:provider.stage}-n8n-app
+        NetworkMode: awsvpc
+        RequiresCompatibilities:
+          - FARGATE
+        Cpu: ${param:taskCpu, "1024"}
+        Memory: ${param:taskMemory, "2048"}
+        ExecutionRoleArn: !Ref FargateTaskExecutionRole
+        TaskRoleArn: !If [HasOptionalTaskRole, '${param:taskRoleArn}', !Ref "AWS::NoValue"]
+        ContainerDefinitions:
+          - Name: n8n # This name is referenced by the ECS Service LoadBalancer config
+            Image: ${param:n8nImageUrl, "docker.n8n.io/n8nio/n8n:latest"}
+            PortMappings:
+              - ContainerPort: 5678
+                Protocol: tcp
+            LogConfiguration:
+              LogDriver: awslogs
+              Options:
+                awslogs-group: !Ref N8NLogGroup
+                awslogs-region: !Ref AWS::Region
+                awslogs-stream-prefix: ecs-n8n
+            Environment:
+              - Name: NODE_ENV
+                Value: "production"
+              - Name: N8N_HOST
+                Value: ${param:n8nHostName} # User must provide this, e.g., n8n.yourdomain.com
+              - Name: DB_TYPE
+                Value: "postgresdb"
+              - Name: DB_POSTGRESDB_HOST
+                Value: !GetAtt N8NPostgresDBInstance.Endpoint.Address
+              - Name: DB_POSTGRESDB_PORT
+                Value: !GetAtt N8NPostgresDBInstance.Endpoint.Port
+              - Name: DB_POSTGRESDB_DATABASE
+                Value: ${param:dbNameForN8NTask, "n8nDatabase"} # Should match N8NPostgresDBInstance.Properties.DBName
+              - Name: DB_POSTGRESDB_USER
+                Value: ${param:dbUserForN8NTask, "n8nadmin"} # Should match N8NPostgresDBInstance.Properties.MasterUsername
+              - Name: EXECUTIONS_MODE
+                Value: ${param:executionsMode, "queue"}
+              - Name: TZ
+                Value: ${param:timezone, "America/New_York"}
+              - Name: N8N_EMAIL_MODE
+                Value: ${param:emailMode, ""}
+              - Name: N8N_EMAIL_SMTP_HOST
+                Value: ${param:smtpHost, ""}
+              - Name: N8N_EMAIL_SMTP_PORT
+                Value: ${param:smtpPort, "587"}
+              - Name: N8N_EMAIL_SMTP_USER
+                Value: ${param:smtpUser, ""}
+              - Name: N8N_EMAIL_SMTP_SENDER
+                Value: ${param:smtpSender, ""}
+            Secrets:
+              - Name: DB_POSTGRESDB_PASSWORD
+                ValueFrom: !Ref N8NDBPasswordSecret # ARN of the RDS master password secret (created by this template)
+              - Name: N8N_ENCRYPTION_KEY
+                ValueFrom: !Ref N8NEncryptionKeySecret # ARN of the n8n encryption key secret (created by this template)
+              - Name: N8N_EMAIL_SMTP_PASSWORD
+                ValueFrom: !If [HasSmtpPasswordSecret, '${param:smtpPasswordSecretArnForTask}', !Ref "AWS::NoValue"]
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-task-def
+
+    # ECS Service for n8n on Fargate
+    N8NFargateService:
+      Type: AWS::ECS::Service
+      Properties:
+        ServiceName: ${self:service}-${self:provider.stage}-n8n-service
+        Cluster: !Ref ECSCluster
+        TaskDefinition: !Ref N8NTaskDefinition
+        DesiredCount: ${param:desiredTasks, 2}
+        LaunchType: FARGATE
+        NetworkConfiguration:
+          AwsvpcConfiguration:
+            Subnets:
+              - !Ref PrivateSubnet1
+              - !Ref PrivateSubnet2
+            SecurityGroups:
+              - !Ref FargateServiceSecurityGroup
+            AssignPublicIp: DISABLED # Corrected
+        LoadBalancers:
+          - TargetGroupArn: !Ref ALBTargetGroup
+            ContainerName: "n8n" # Must match name in TaskDefinition.ContainerDefinitions
+            ContainerPort: 5678
+        EnableECSManagedTags: true
+        PropagateTags: SERVICE
+        DeploymentConfiguration:
+          MinimumHealthyPercent: 50
+          MaximumPercent: 200
+        HealthCheckGracePeriodSeconds: ${param:healthCheckGracePeriodSeconds, 60}
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-fargate-service
+      DependsOn:
+        - ALBListenerHTTPS # Ensure listener is ready before service tries to register
+
+    # Auto Scaling for Fargate Service
+    N8NServiceScalableTarget:
+      Type: AWS::ApplicationAutoScaling::ScalableTarget
+      Properties:
+        ServiceNamespace: ecs
+        ResourceId: !Join ['', ['service/', !Ref ECSCluster, '/', !GetAtt N8NFargateService.Name]]
+        ScalableDimension: ecs:service:DesiredCount
+        MinCapacity: ${param:minTasks, 2}
+        MaxCapacity: ${param:maxTasks, 4}
+
+    N8NServiceCpuScalingPolicy:
+      Type: AWS::ApplicationAutoScaling::ScalingPolicy
+      Properties:
+        PolicyName: ${self:service}-${self:provider.stage}-n8n-cpu-scaling
+        PolicyType: TargetTrackingScaling
+        ScalingTargetId: !Ref N8NServiceScalableTarget
+        TargetTrackingScalingPolicyConfiguration:
+          TargetValue: 75.0
+          ScaleInCooldown: 300
+          ScaleOutCooldown: 60
+          PredefinedMetricSpecification:
+            PredefinedMetricType: ECSServiceAverageCPUUtilization
+
+    N8NServiceMemoryScalingPolicy:
+      Type: AWS::ApplicationAutoScaling::ScalingPolicy
+      Properties:
+        PolicyName: ${self:service}-${self:provider.stage}-n8n-memory-scaling
+        PolicyType: TargetTrackingScaling
+        ScalingTargetId: !Ref N8NServiceScalableTarget
+        TargetTrackingScalingPolicyConfiguration:
+          TargetValue: 75.0
+          ScaleInCooldown: 300
+          ScaleOutCooldown: 60
+          PredefinedMetricSpecification:
+            PredefinedMetricType: ECSServiceAverageMemoryUtilization
+    ECSClusterName:
+      Description: "Name of the ECS Cluster"
+      Value: !Ref ECSCluster
+      Export:
+        Name: ${self:service}-${self:provider.stage}-ECSClusterName
+    N8NTaskDefinitionArn:
+      Description: "ARN of the n8n Task Definition"
+      Value: !Ref N8NTaskDefinition
+      Export:
+        Name: ${self:service}-${self:provider.stage}-N8NTaskDefinitionArn
+    N8NFargateServiceName:
+      Description: "Name of the n8n Fargate Service"
+      Value: !GetAtt N8NFargateService.Name # Service name is an attribute
+      Export:
+        Name: ${self:service}-${self:provider.stage}-N8NFargateServiceName
+
+    # ECS Cluster
+    ECSCluster:
+      Type: AWS::ECS::Cluster
+      Properties:
+        ClusterName: ${self:service}-${self:provider.stage}-n8n-cluster
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-cluster
+
+    # CloudWatch Log Group for Fargate Tasks
+    N8NLogGroup:
+      Type: AWS::Logs::LogGroup
+      Properties:
+        LogGroupName: /ecs/${self:service}-${self:provider.stage}/n8n-app
+        RetentionInDays: ${param:logRetentionInDays, 7}
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-log-group
+
+    # Fargate Task Definition for n8n
+    N8NTaskDefinition:
+      Type: AWS::ECS::TaskDefinition
+      Properties:
+        Family: ${self:service}-${self:provider.stage}-n8n-app
+        NetworkMode: awsvpc
+        RequiresCompatibilities:
+          - FARGATE
+        Cpu: ${param:taskCpu, "1024"}
+        Memory: ${param:taskMemory, "2048"}
+        ExecutionRoleArn: !Ref FargateTaskExecutionRole
+        TaskRoleArn: !If [HasOptionalTaskRole, '${param:taskRoleArn}', !Ref "AWS::NoValue"]
+        ContainerDefinitions:
+          - Name: n8n # This name is referenced by the ECS Service LoadBalancer config
+            Image: ${param:n8nImageUrl, "docker.n8n.io/n8nio/n8n:latest"}
+            PortMappings:
+              - ContainerPort: 5678
+                Protocol: tcp
+            LogConfiguration:
+              LogDriver: awslogs
+              Options:
+                awslogs-group: !Ref N8NLogGroup
+                awslogs-region: !Ref AWS::Region
+                awslogs-stream-prefix: ecs-n8n
+            Environment:
+              - Name: NODE_ENV
+                Value: "production"
+              - Name: N8N_HOST
+                Value: ${param:n8nHostName} # User must provide this, e.g., n8n.yourdomain.com
+              - Name: DB_TYPE
+                Value: "postgresdb"
+              - Name: DB_POSTGRESDB_HOST
+                Value: !GetAtt N8NPostgresDBInstance.Endpoint.Address
+              - Name: DB_POSTGRESDB_PORT
+                Value: !GetAtt N8NPostgresDBInstance.Endpoint.Port
+              - Name: DB_POSTGRESDB_DATABASE
+                Value: ${param:dbNameForN8NTask, "n8nDatabase"} # Should match N8NPostgresDBInstance.Properties.DBName
+              - Name: DB_POSTGRESDB_USER
+                Value: ${param:dbUserForN8NTask, "n8nadmin"} # Should match N8NPostgresDBInstance.Properties.MasterUsername
+              - Name: EXECUTIONS_MODE
+                Value: ${param:executionsMode, "queue"}
+              - Name: TZ
+                Value: ${param:timezone, "America/New_York"}
+              - Name: N8N_EMAIL_MODE
+                Value: ${param:emailMode, ""}
+              - Name: N8N_EMAIL_SMTP_HOST
+                Value: ${param:smtpHost, ""}
+              - Name: N8N_EMAIL_SMTP_PORT
+                Value: ${param:smtpPort, "587"}
+              - Name: N8N_EMAIL_SMTP_USER
+                Value: ${param:smtpUser, ""}
+              - Name: N8N_EMAIL_SMTP_SENDER
+                Value: ${param:smtpSender, ""}
+            Secrets:
+              - Name: DB_POSTGRESDB_PASSWORD
+                ValueFrom: !Ref N8NDBPasswordSecret # ARN of the RDS master password secret (created by this template)
+              - Name: N8N_ENCRYPTION_KEY
+                ValueFrom: !Ref N8NEncryptionKeySecret # ARN of the n8n encryption key secret (created by this template)
+              - Name: N8N_EMAIL_SMTP_PASSWORD
+                ValueFrom: !If [HasSmtpPasswordSecret, '${param:smtpPasswordSecretArnForTask}', !Ref "AWS::NoValue"]
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-task-def
+
+    # ECS Service for n8n on Fargate
+    N8NFargateService:
+      Type: AWS::ECS::Service
+      Properties:
+        ServiceName: ${self:service}-${self:provider.stage}-n8n-service
+        Cluster: !Ref ECSCluster
+        TaskDefinition: !Ref N8NTaskDefinition
+        DesiredCount: ${param:desiredTasks, 2}
+        LaunchType: FARGATE
+        NetworkConfiguration:
+          AwsvpcConfiguration:
+            Subnets:
+              - !Ref PrivateSubnet1
+              - !Ref PrivateSubnet2
+            SecurityGroups:
+              - !Ref FargateServiceSecurityGroup
+            AssignPublicIp: DISABLED # Corrected
+        LoadBalancers:
+          - TargetGroupArn: !Ref ALBTargetGroup
+            ContainerName: "n8n" # Must match name in TaskDefinition.ContainerDefinitions
+            ContainerPort: 5678
+        EnableECSManagedTags: true
+        PropagateTags: SERVICE
+        DeploymentConfiguration:
+          MinimumHealthyPercent: 50
+          MaximumPercent: 200
+        HealthCheckGracePeriodSeconds: ${param:healthCheckGracePeriodSeconds, 60}
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-fargate-service
+      DependsOn:
+        - ALBListenerHTTPS # Ensure listener is ready before service tries to register
+
+    # Auto Scaling for Fargate Service
+    N8NServiceScalableTarget:
+      Type: AWS::ApplicationAutoScaling::ScalableTarget
+      Properties:
+        ServiceNamespace: ecs
+        ResourceId: !Join ['', ['service/', !Ref ECSCluster, '/', !GetAtt N8NFargateService.Name]]
+        ScalableDimension: ecs:service:DesiredCount
+        MinCapacity: ${param:minTasks, 2}
+        MaxCapacity: ${param:maxTasks, 4}
+
+    N8NServiceCpuScalingPolicy:
+      Type: AWS::ApplicationAutoScaling::ScalingPolicy
+      Properties:
+        PolicyName: ${self:service}-${self:provider.stage}-n8n-cpu-scaling
+        PolicyType: TargetTrackingScaling
+        ScalingTargetId: !Ref N8NServiceScalableTarget
+        TargetTrackingScalingPolicyConfiguration:
+          TargetValue: 75.0
+          ScaleInCooldown: 300
+          ScaleOutCooldown: 60
+          PredefinedMetricSpecification:
+            PredefinedMetricType: ECSServiceAverageCPUUtilization
+
+    N8NServiceMemoryScalingPolicy:
+      Type: AWS::ApplicationAutoScaling::ScalingPolicy
+      Properties:
+        PolicyName: ${self:service}-${self:provider.stage}-n8n-memory-scaling
+        PolicyType: TargetTrackingScaling
+        ScalingTargetId: !Ref N8NServiceScalableTarget
+        TargetTrackingScalingPolicyConfiguration:
+          TargetValue: 75.0
+          ScaleInCooldown: 300
+          ScaleOutCooldown: 60
+          PredefinedMetricSpecification:
+            PredefinedMetricType: ECSServiceAverageMemoryUtilization
+    ECSClusterName:
+      Description: "Name of the ECS Cluster"
+      Value: !Ref ECSCluster
+      Export:
+        Name: ${self:service}-${self:provider.stage}-ECSClusterName
+    N8NTaskDefinitionArn:
+      Description: "ARN of the n8n Task Definition"
+      Value: !Ref N8NTaskDefinition
+      Export:
+        Name: ${self:service}-${self:provider.stage}-N8NTaskDefinitionArn
+    N8NFargateServiceName:
+      Description: "Name of the n8n Fargate Service"
+      Value: !GetAtt N8NFargateService.Name # Service name is an attribute
+      Export:
+        Name: ${self:service}-${self:provider.stage}-N8NFargateServiceName
+
+    # ECS Cluster
+    ECSCluster:
+      Type: AWS::ECS::Cluster
+      Properties:
+        ClusterName: ${self:service}-${self:provider.stage}-n8n-cluster
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-cluster
+
+    # CloudWatch Log Group for Fargate Tasks
+    N8NLogGroup:
+      Type: AWS::Logs::LogGroup
+      Properties:
+        LogGroupName: /ecs/${self:service}-${self:provider.stage}/n8n-app
+        RetentionInDays: ${param:logRetentionInDays, 7}
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-log-group
+
+    # Fargate Task Definition for n8n
+    N8NTaskDefinition:
+      Type: AWS::ECS::TaskDefinition
+      Properties:
+        Family: ${self:service}-${self:provider.stage}-n8n-app
+        NetworkMode: awsvpc
+        RequiresCompatibilities:
+          - FARGATE
+        Cpu: ${param:taskCpu, "1024"}
+        Memory: ${param:taskMemory, "2048"}
+        ExecutionRoleArn: !Ref FargateTaskExecutionRole
+        TaskRoleArn: !If [HasOptionalTaskRole, '${param:taskRoleArn}', !Ref "AWS::NoValue"]
+        ContainerDefinitions:
+          - Name: n8n # This name is referenced by the ECS Service LoadBalancer config
+            Image: ${param:n8nImageUrl, "docker.n8n.io/n8nio/n8n:latest"}
+            PortMappings:
+              - ContainerPort: 5678
+                Protocol: tcp
+            LogConfiguration:
+              LogDriver: awslogs
+              Options:
+                awslogs-group: !Ref N8NLogGroup
+                awslogs-region: !Ref AWS::Region
+                awslogs-stream-prefix: ecs-n8n
+            Environment:
+              - Name: NODE_ENV
+                Value: "production"
+              - Name: N8N_HOST
+                Value: ${param:n8nHostName} # User must provide this, e.g., n8n.yourdomain.com
+              - Name: DB_TYPE
+                Value: "postgresdb"
+              - Name: DB_POSTGRESDB_HOST
+                Value: !GetAtt N8NPostgresDBInstance.Endpoint.Address
+              - Name: DB_POSTGRESDB_PORT
+                Value: !GetAtt N8NPostgresDBInstance.Endpoint.Port
+              - Name: DB_POSTGRESDB_DATABASE
+                Value: ${param:dbNameForN8NTask, "n8nDatabase"} # Should match N8NPostgresDBInstance.Properties.DBName
+              - Name: DB_POSTGRESDB_USER
+                Value: ${param:dbUserForN8NTask, "n8nadmin"} # Should match N8NPostgresDBInstance.Properties.MasterUsername
+              - Name: EXECUTIONS_MODE
+                Value: ${param:executionsMode, "queue"}
+              - Name: TZ
+                Value: ${param:timezone, "America/New_York"}
+              - Name: N8N_EMAIL_MODE
+                Value: ${param:emailMode, ""}
+              - Name: N8N_EMAIL_SMTP_HOST
+                Value: ${param:smtpHost, ""}
+              - Name: N8N_EMAIL_SMTP_PORT
+                Value: ${param:smtpPort, "587"}
+              - Name: N8N_EMAIL_SMTP_USER
+                Value: ${param:smtpUser, ""}
+              - Name: N8N_EMAIL_SMTP_SENDER
+                Value: ${param:smtpSender, ""}
+            Secrets:
+              - Name: DB_POSTGRESDB_PASSWORD
+                ValueFrom: !Ref N8NDBPasswordSecret # ARN of the RDS master password secret (created by this template)
+              - Name: N8N_ENCRYPTION_KEY
+                ValueFrom: !Ref N8NEncryptionKeySecret # ARN of the n8n encryption key secret (created by this template)
+              - Name: N8N_EMAIL_SMTP_PASSWORD
+                ValueFrom: !If [HasSmtpPasswordSecret, '${param:smtpPasswordSecretArnForTask}', !Ref "AWS::NoValue"]
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-task-def
+
+    # ECS Service for n8n on Fargate
+    N8NFargateService:
+      Type: AWS::ECS::Service
+      Properties:
+        ServiceName: ${self:service}-${self:provider.stage}-n8n-service
+        Cluster: !Ref ECSCluster
+        TaskDefinition: !Ref N8NTaskDefinition
+        DesiredCount: ${param:desiredTasks, 2}
+        LaunchType: FARGATE
+        NetworkConfiguration:
+          AwsvpcConfiguration:
+            Subnets:
+              - !Ref PrivateSubnet1
+              - !Ref PrivateSubnet2
+            SecurityGroups:
+              - !Ref FargateServiceSecurityGroup
+            AssignPublicIp: DISABLED # Corrected
+        LoadBalancers:
+          - TargetGroupArn: !Ref ALBTargetGroup
+            ContainerName: "n8n" # Must match name in TaskDefinition.ContainerDefinitions
+            ContainerPort: 5678
+        EnableECSManagedTags: true
+        PropagateTags: SERVICE
+        DeploymentConfiguration:
+          MinimumHealthyPercent: 50
+          MaximumPercent: 200
+        HealthCheckGracePeriodSeconds: ${param:healthCheckGracePeriodSeconds, 60}
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-fargate-service
+      DependsOn:
+        - ALBListenerHTTPS # Ensure listener is ready before service tries to register
+
+    # Auto Scaling for Fargate Service
+    N8NServiceScalableTarget:
+      Type: AWS::ApplicationAutoScaling::ScalableTarget
+      Properties:
+        ServiceNamespace: ecs
+        ResourceId: !Join ['', ['service/', !Ref ECSCluster, '/', !GetAtt N8NFargateService.Name]]
+        ScalableDimension: ecs:service:DesiredCount
+        MinCapacity: ${param:minTasks, 2}
+        MaxCapacity: ${param:maxTasks, 4}
+
+    N8NServiceCpuScalingPolicy:
+      Type: AWS::ApplicationAutoScaling::ScalingPolicy
+      Properties:
+        PolicyName: ${self:service}-${self:provider.stage}-n8n-cpu-scaling
+        PolicyType: TargetTrackingScaling
+        ScalingTargetId: !Ref N8NServiceScalableTarget
+        TargetTrackingScalingPolicyConfiguration:
+          TargetValue: 75.0
+          ScaleInCooldown: 300
+          ScaleOutCooldown: 60
+          PredefinedMetricSpecification:
+            PredefinedMetricType: ECSServiceAverageCPUUtilization
+
+    N8NServiceMemoryScalingPolicy:
+      Type: AWS::ApplicationAutoScaling::ScalingPolicy
+      Properties:
+        PolicyName: ${self:service}-${self:provider.stage}-n8n-memory-scaling
+        PolicyType: TargetTrackingScaling
+        ScalingTargetId: !Ref N8NServiceScalableTarget
+        TargetTrackingScalingPolicyConfiguration:
+          TargetValue: 75.0
+          ScaleInCooldown: 300
+          ScaleOutCooldown: 60
+          PredefinedMetricSpecification:
+            PredefinedMetricType: ECSServiceAverageMemoryUtilization
+    ECSClusterName:
+      Description: "Name of the ECS Cluster"
+      Value: !Ref ECSCluster
+      Export:
+        Name: ${self:service}-${self:provider.stage}-ECSClusterName
+    N8NTaskDefinitionArn:
+      Description: "ARN of the n8n Task Definition"
+      Value: !Ref N8NTaskDefinition
+      Export:
+        Name: ${self:service}-${self:provider.stage}-N8NTaskDefinitionArn
+    N8NFargateServiceName:
+      Description: "Name of the n8n Fargate Service"
+      Value: !GetAtt N8NFargateService.Name # Service name is an attribute
+      Export:
+        Name: ${self:service}-${self:provider.stage}-N8NFargateServiceName
+
+    # ECS Cluster
+    ECSCluster:
+      Type: AWS::ECS::Cluster
+      Properties:
+        ClusterName: ${self:service}-${self:provider.stage}-n8n-cluster
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-cluster
+
+    # CloudWatch Log Group for Fargate Tasks
+    N8NLogGroup:
+      Type: AWS::Logs::LogGroup
+      Properties:
+        LogGroupName: /ecs/${self:service}-${self:provider.stage}/n8n-app
+        RetentionInDays: ${param:logRetentionInDays, 7}
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-log-group
+
+    # Fargate Task Definition for n8n
+    N8NTaskDefinition:
+      Type: AWS::ECS::TaskDefinition
+      Properties:
+        Family: ${self:service}-${self:provider.stage}-n8n-app
+        NetworkMode: awsvpc
+        RequiresCompatibilities:
+          - FARGATE
+        Cpu: ${param:taskCpu, "1024"}
+        Memory: ${param:taskMemory, "2048"}
+        ExecutionRoleArn: !Ref FargateTaskExecutionRole
+        TaskRoleArn: !If [HasOptionalTaskRole, '${param:taskRoleArn}', !Ref "AWS::NoValue"]
+        ContainerDefinitions:
+          - Name: n8n # This name is referenced by the ECS Service LoadBalancer config
+            Image: ${param:n8nImageUrl, "docker.n8n.io/n8nio/n8n:latest"}
+            PortMappings:
+              - ContainerPort: 5678
+                Protocol: tcp
+            LogConfiguration:
+              LogDriver: awslogs
+              Options:
+                awslogs-group: !Ref N8NLogGroup
+                awslogs-region: !Ref AWS::Region
+                awslogs-stream-prefix: ecs-n8n
+            Environment:
+              - Name: NODE_ENV
+                Value: "production"
+              - Name: N8N_HOST
+                Value: ${param:n8nHostName} # User must provide this, e.g., n8n.yourdomain.com
+              - Name: DB_TYPE
+                Value: "postgresdb"
+              - Name: DB_POSTGRESDB_HOST
+                Value: !GetAtt N8NPostgresDBInstance.Endpoint.Address
+              - Name: DB_POSTGRESDB_PORT
+                Value: !GetAtt N8NPostgresDBInstance.Endpoint.Port
+              - Name: DB_POSTGRESDB_DATABASE
+                Value: ${param:dbNameForN8NTask, "n8nDatabase"} # Should match N8NPostgresDBInstance.Properties.DBName
+              - Name: DB_POSTGRESDB_USER
+                Value: ${param:dbUserForN8NTask, "n8nadmin"} # Should match N8NPostgresDBInstance.Properties.MasterUsername
+              - Name: EXECUTIONS_MODE
+                Value: ${param:executionsMode, "queue"}
+              - Name: TZ
+                Value: ${param:timezone, "America/New_York"}
+              - Name: N8N_EMAIL_MODE
+                Value: ${param:emailMode, ""}
+              - Name: N8N_EMAIL_SMTP_HOST
+                Value: ${param:smtpHost, ""}
+              - Name: N8N_EMAIL_SMTP_PORT
+                Value: ${param:smtpPort, "587"}
+              - Name: N8N_EMAIL_SMTP_USER
+                Value: ${param:smtpUser, ""}
+              - Name: N8N_EMAIL_SMTP_SENDER
+                Value: ${param:smtpSender, ""}
+            Secrets:
+              - Name: DB_POSTGRESDB_PASSWORD
+                ValueFrom: !Ref N8NDBPasswordSecret # ARN of the RDS master password secret (created by this template)
+              - Name: N8N_ENCRYPTION_KEY
+                ValueFrom: !Ref N8NEncryptionKeySecret # ARN of the n8n encryption key secret (created by this template)
+              - Name: N8N_EMAIL_SMTP_PASSWORD
+                ValueFrom: !If [HasSmtpPasswordSecret, '${param:smtpPasswordSecretArnForTask}', !Ref "AWS::NoValue"]
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-task-def
+
+    # ECS Service for n8n on Fargate
+    N8NFargateService:
+      Type: AWS::ECS::Service
+      Properties:
+        ServiceName: ${self:service}-${self:provider.stage}-n8n-service
+        Cluster: !Ref ECSCluster
+        TaskDefinition: !Ref N8NTaskDefinition
+        DesiredCount: ${param:desiredTasks, 2}
+        LaunchType: FARGATE
+        NetworkConfiguration:
+          AwsvpcConfiguration:
+            Subnets:
+              - !Ref PrivateSubnet1
+              - !Ref PrivateSubnet2
+            SecurityGroups:
+              - !Ref FargateServiceSecurityGroup
+            AssignPublicIp: DISABLED # Corrected
+        LoadBalancers:
+          - TargetGroupArn: !Ref ALBTargetGroup
+            ContainerName: "n8n" # Must match name in TaskDefinition.ContainerDefinitions
+            ContainerPort: 5678
+        EnableECSManagedTags: true
+        PropagateTags: SERVICE
+        DeploymentConfiguration:
+          MinimumHealthyPercent: 50
+          MaximumPercent: 200
+        HealthCheckGracePeriodSeconds: ${param:healthCheckGracePeriodSeconds, 60}
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-fargate-service
+      DependsOn:
+        - ALBListenerHTTPS # Ensure listener is ready before service tries to register
+
+    # Auto Scaling for Fargate Service
+    N8NServiceScalableTarget:
+      Type: AWS::ApplicationAutoScaling::ScalableTarget
+      Properties:
+        ServiceNamespace: ecs
+        ResourceId: !Join ['', ['service/', !Ref ECSCluster, '/', !GetAtt N8NFargateService.Name]]
+        ScalableDimension: ecs:service:DesiredCount
+        MinCapacity: ${param:minTasks, 2}
+        MaxCapacity: ${param:maxTasks, 4}
+
+    N8NServiceCpuScalingPolicy:
+      Type: AWS::ApplicationAutoScaling::ScalingPolicy
+      Properties:
+        PolicyName: ${self:service}-${self:provider.stage}-n8n-cpu-scaling
+        PolicyType: TargetTrackingScaling
+        ScalingTargetId: !Ref N8NServiceScalableTarget
+        TargetTrackingScalingPolicyConfiguration:
+          TargetValue: 75.0
+          ScaleInCooldown: 300
+          ScaleOutCooldown: 60
+          PredefinedMetricSpecification:
+            PredefinedMetricType: ECSServiceAverageCPUUtilization
+
+    N8NServiceMemoryScalingPolicy:
+      Type: AWS::ApplicationAutoScaling::ScalingPolicy
+      Properties:
+        PolicyName: ${self:service}-${self:provider.stage}-n8n-memory-scaling
+        PolicyType: TargetTrackingScaling
+        ScalingTargetId: !Ref N8NServiceScalableTarget
+        TargetTrackingScalingPolicyConfiguration:
+          TargetValue: 75.0
+          ScaleInCooldown: 300
+          ScaleOutCooldown: 60
+          PredefinedMetricSpecification:
+            PredefinedMetricType: ECSServiceAverageMemoryUtilization
+    ECSClusterName:
+      Description: "Name of the ECS Cluster"
+      Value: !Ref ECSCluster
+      Export:
+        Name: ${self:service}-${self:provider.stage}-ECSClusterName
+    N8NTaskDefinitionArn:
+      Description: "ARN of the n8n Task Definition"
+      Value: !Ref N8NTaskDefinition
+      Export:
+        Name: ${self:service}-${self:provider.stage}-N8NTaskDefinitionArn
+    N8NFargateServiceName:
+      Description: "Name of the n8n Fargate Service"
+      Value: !GetAtt N8NFargateService.Name # Service name is an attribute
+      Export:
+        Name: ${self:service}-${self:provider.stage}-N8NFargateServiceName
+
+    # ECS Cluster
+    ECSCluster:
+      Type: AWS::ECS::Cluster
+      Properties:
+        ClusterName: ${self:service}-${self:provider.stage}-n8n-cluster
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-cluster
+
+    # CloudWatch Log Group for Fargate Tasks
+    N8NLogGroup:
+      Type: AWS::Logs::LogGroup
+      Properties:
+        LogGroupName: /ecs/${self:service}-${self:provider.stage}/n8n-app
+        RetentionInDays: ${param:logRetentionInDays, 7}
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-log-group
+
+    # Fargate Task Definition for n8n
+    N8NTaskDefinition:
+      Type: AWS::ECS::TaskDefinition
+      Properties:
+        Family: ${self:service}-${self:provider.stage}-n8n-app
+        NetworkMode: awsvpc
+        RequiresCompatibilities:
+          - FARGATE
+        Cpu: ${param:taskCpu, "1024"}
+        Memory: ${param:taskMemory, "2048"}
+        ExecutionRoleArn: !Ref FargateTaskExecutionRole
+        TaskRoleArn: !If [HasOptionalTaskRole, '${param:taskRoleArn}', !Ref "AWS::NoValue"]
+        ContainerDefinitions:
+          - Name: n8n # This name is referenced by the ECS Service LoadBalancer config
+            Image: ${param:n8nImageUrl, "docker.n8n.io/n8nio/n8n:latest"}
+            PortMappings:
+              - ContainerPort: 5678
+                Protocol: tcp
+            LogConfiguration:
+              LogDriver: awslogs
+              Options:
+                awslogs-group: !Ref N8NLogGroup
+                awslogs-region: !Ref AWS::Region
+                awslogs-stream-prefix: ecs-n8n
+            Environment:
+              - Name: NODE_ENV
+                Value: "production"
+              - Name: N8N_HOST
+                Value: ${param:n8nHostName} # User must provide this, e.g., n8n.yourdomain.com
+              - Name: DB_TYPE
+                Value: "postgresdb"
+              - Name: DB_POSTGRESDB_HOST
+                Value: !GetAtt N8NPostgresDBInstance.Endpoint.Address
+              - Name: DB_POSTGRESDB_PORT
+                Value: !GetAtt N8NPostgresDBInstance.Endpoint.Port
+              - Name: DB_POSTGRESDB_DATABASE
+                Value: ${param:dbNameForN8NTask, "n8nDatabase"} # Should match N8NPostgresDBInstance.Properties.DBName
+              - Name: DB_POSTGRESDB_USER
+                Value: ${param:dbUserForN8NTask, "n8nadmin"} # Should match N8NPostgresDBInstance.Properties.MasterUsername
+              - Name: EXECUTIONS_MODE
+                Value: ${param:executionsMode, "queue"}
+              - Name: TZ
+                Value: ${param:timezone, "America/New_York"}
+              - Name: N8N_EMAIL_MODE
+                Value: ${param:emailMode, ""}
+              - Name: N8N_EMAIL_SMTP_HOST
+                Value: ${param:smtpHost, ""}
+              - Name: N8N_EMAIL_SMTP_PORT
+                Value: ${param:smtpPort, "587"}
+              - Name: N8N_EMAIL_SMTP_USER
+                Value: ${param:smtpUser, ""}
+              - Name: N8N_EMAIL_SMTP_SENDER
+                Value: ${param:smtpSender, ""}
+            Secrets:
+              - Name: DB_POSTGRESDB_PASSWORD
+                ValueFrom: !Ref N8NDBPasswordSecret # ARN of the RDS master password secret (created by this template)
+              - Name: N8N_ENCRYPTION_KEY
+                ValueFrom: !Ref N8NEncryptionKeySecret # ARN of the n8n encryption key secret (created by this template)
+              - Name: N8N_EMAIL_SMTP_PASSWORD
+                ValueFrom: !If [HasSmtpPasswordSecret, '${param:smtpPasswordSecretArnForTask}', !Ref "AWS::NoValue"]
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-task-def
+
+    # ECS Service for n8n on Fargate
+    N8NFargateService:
+      Type: AWS::ECS::Service
+      Properties:
+        ServiceName: ${self:service}-${self:provider.stage}-n8n-service
+        Cluster: !Ref ECSCluster
+        TaskDefinition: !Ref N8NTaskDefinition
+        DesiredCount: ${param:desiredTasks, 2}
+        LaunchType: FARGATE
+        NetworkConfiguration:
+          AwsvpcConfiguration:
+            Subnets:
+              - !Ref PrivateSubnet1
+              - !Ref PrivateSubnet2
+            SecurityGroups:
+              - !Ref FargateServiceSecurityGroup
+            AssignPublicIp: DISABLED # Corrected
+        LoadBalancers:
+          - TargetGroupArn: !Ref ALBTargetGroup
+            ContainerName: "n8n" # Must match name in TaskDefinition.ContainerDefinitions
+            ContainerPort: 5678
+        EnableECSManagedTags: true
+        PropagateTags: SERVICE
+        DeploymentConfiguration:
+          MinimumHealthyPercent: 50
+          MaximumPercent: 200
+        HealthCheckGracePeriodSeconds: ${param:healthCheckGracePeriodSeconds, 60}
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-fargate-service
+      DependsOn:
+        - ALBListenerHTTPS # Ensure listener is ready before service tries to register
+
+    # Auto Scaling for Fargate Service
+    N8NServiceScalableTarget:
+      Type: AWS::ApplicationAutoScaling::ScalableTarget
+      Properties:
+        ServiceNamespace: ecs
+        ResourceId: !Join ['', ['service/', !Ref ECSCluster, '/', !GetAtt N8NFargateService.Name]]
+        ScalableDimension: ecs:service:DesiredCount
+        MinCapacity: ${param:minTasks, 2}
+        MaxCapacity: ${param:maxTasks, 4}
+
+    N8NServiceCpuScalingPolicy:
+      Type: AWS::ApplicationAutoScaling::ScalingPolicy
+      Properties:
+        PolicyName: ${self:service}-${self:provider.stage}-n8n-cpu-scaling
+        PolicyType: TargetTrackingScaling
+        ScalingTargetId: !Ref N8NServiceScalableTarget
+        TargetTrackingScalingPolicyConfiguration:
+          TargetValue: 75.0
+          ScaleInCooldown: 300
+          ScaleOutCooldown: 60
+          PredefinedMetricSpecification:
+            PredefinedMetricType: ECSServiceAverageCPUUtilization
+
+    N8NServiceMemoryScalingPolicy:
+      Type: AWS::ApplicationAutoScaling::ScalingPolicy
+      Properties:
+        PolicyName: ${self:service}-${self:provider.stage}-n8n-memory-scaling
+        PolicyType: TargetTrackingScaling
+        ScalingTargetId: !Ref N8NServiceScalableTarget
+        TargetTrackingScalingPolicyConfiguration:
+          TargetValue: 75.0
+          ScaleInCooldown: 300
+          ScaleOutCooldown: 60
+          PredefinedMetricSpecification:
+            PredefinedMetricType: ECSServiceAverageMemoryUtilization
+    ECSClusterName:
+      Description: "Name of the ECS Cluster"
+      Value: !Ref ECSCluster
+      Export:
+        Name: ${self:service}-${self:provider.stage}-ECSClusterName
+    N8NTaskDefinitionArn:
+      Description: "ARN of the n8n Task Definition"
+      Value: !Ref N8NTaskDefinition
+      Export:
+        Name: ${self:service}-${self:provider.stage}-N8NTaskDefinitionArn
+    N8NFargateServiceName:
+      Description: "Name of the n8n Fargate Service"
+      Value: !GetAtt N8NFargateService.Name # Service name is an attribute
+      Export:
+        Name: ${self:service}-${self:provider.stage}-N8NFargateServiceName
+
+    # ECS Cluster
+    ECSCluster:
+      Type: AWS::ECS::Cluster
+      Properties:
+        ClusterName: ${self:service}-${self:provider.stage}-n8n-cluster
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-cluster
+
+    # CloudWatch Log Group for Fargate Tasks
+    N8NLogGroup:
+      Type: AWS::Logs::LogGroup
+      Properties:
+        LogGroupName: /ecs/${self:service}-${self:provider.stage}/n8n-app
+        RetentionInDays: ${param:logRetentionInDays, 7}
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-log-group
+
+    # Fargate Task Definition for n8n
+    N8NTaskDefinition:
+      Type: AWS::ECS::TaskDefinition
+      Properties:
+        Family: ${self:service}-${self:provider.stage}-n8n-app
+        NetworkMode: awsvpc
+        RequiresCompatibilities:
+          - FARGATE
+        Cpu: ${param:taskCpu, "1024"}
+        Memory: ${param:taskMemory, "2048"}
+        ExecutionRoleArn: !Ref FargateTaskExecutionRole
+        TaskRoleArn: !If [HasOptionalTaskRole, '${param:taskRoleArn}', !Ref "AWS::NoValue"]
+        ContainerDefinitions:
+          - Name: n8n # This name is referenced by the ECS Service LoadBalancer config
+            Image: ${param:n8nImageUrl, "docker.n8n.io/n8nio/n8n:latest"}
+            PortMappings:
+              - ContainerPort: 5678
+                Protocol: tcp
+            LogConfiguration:
+              LogDriver: awslogs
+              Options:
+                awslogs-group: !Ref N8NLogGroup
+                awslogs-region: !Ref AWS::Region
+                awslogs-stream-prefix: ecs-n8n
+            Environment:
+              - Name: NODE_ENV
+                Value: "production"
+              - Name: N8N_HOST
+                Value: ${param:n8nHostName} # User must provide this, e.g., n8n.yourdomain.com
+              - Name: DB_TYPE
+                Value: "postgresdb"
+              - Name: DB_POSTGRESDB_HOST
+                Value: !GetAtt N8NPostgresDBInstance.Endpoint.Address
+              - Name: DB_POSTGRESDB_PORT
+                Value: !GetAtt N8NPostgresDBInstance.Endpoint.Port
+              - Name: DB_POSTGRESDB_DATABASE
+                Value: ${param:dbNameForN8NTask, "n8nDatabase"} # Should match N8NPostgresDBInstance.Properties.DBName
+              - Name: DB_POSTGRESDB_USER
+                Value: ${param:dbUserForN8NTask, "n8nadmin"} # Should match N8NPostgresDBInstance.Properties.MasterUsername
+              - Name: EXECUTIONS_MODE
+                Value: ${param:executionsMode, "queue"}
+              - Name: TZ
+                Value: ${param:timezone, "America/New_York"}
+              - Name: N8N_EMAIL_MODE
+                Value: ${param:emailMode, ""}
+              - Name: N8N_EMAIL_SMTP_HOST
+                Value: ${param:smtpHost, ""}
+              - Name: N8N_EMAIL_SMTP_PORT
+                Value: ${param:smtpPort, "587"}
+              - Name: N8N_EMAIL_SMTP_USER
+                Value: ${param:smtpUser, ""}
+              - Name: N8N_EMAIL_SMTP_SENDER
+                Value: ${param:smtpSender, ""}
+            Secrets:
+              - Name: DB_POSTGRESDB_PASSWORD
+                ValueFrom: !Ref N8NDBPasswordSecret # ARN of the RDS master password secret (created by this template)
+              - Name: N8N_ENCRYPTION_KEY
+                ValueFrom: !Ref N8NEncryptionKeySecret # ARN of the n8n encryption key secret (created by this template)
+              - Name: N8N_EMAIL_SMTP_PASSWORD
+                ValueFrom: !If [HasSmtpPasswordSecret, '${param:smtpPasswordSecretArnForTask}', !Ref "AWS::NoValue"]
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-task-def
+
+    # ECS Service for n8n on Fargate
+    N8NFargateService:
+      Type: AWS::ECS::Service
+      Properties:
+        ServiceName: ${self:service}-${self:provider.stage}-n8n-service
+        Cluster: !Ref ECSCluster
+        TaskDefinition: !Ref N8NTaskDefinition
+        DesiredCount: ${param:desiredTasks, 2}
+        LaunchType: FARGATE
+        NetworkConfiguration:
+          AwsvpcConfiguration:
+            Subnets:
+              - !Ref PrivateSubnet1
+              - !Ref PrivateSubnet2
+            SecurityGroups:
+              - !Ref FargateServiceSecurityGroup
+            AssignPublicIp: DISABLED # Corrected
+        LoadBalancers:
+          - TargetGroupArn: !Ref ALBTargetGroup
+            ContainerName: "n8n" # Must match name in TaskDefinition.ContainerDefinitions
+            ContainerPort: 5678
+        EnableECSManagedTags: true
+        PropagateTags: SERVICE
+        DeploymentConfiguration:
+          MinimumHealthyPercent: 50
+          MaximumPercent: 200
+        HealthCheckGracePeriodSeconds: ${param:healthCheckGracePeriodSeconds, 60}
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-fargate-service
+      DependsOn:
+        - ALBListenerHTTPS # Ensure listener is ready before service tries to register
+
+    # Auto Scaling for Fargate Service
+    N8NServiceScalableTarget:
+      Type: AWS::ApplicationAutoScaling::ScalableTarget
+      Properties:
+        ServiceNamespace: ecs
+        ResourceId: !Join ['', ['service/', !Ref ECSCluster, '/', !GetAtt N8NFargateService.Name]]
+        ScalableDimension: ecs:service:DesiredCount
+        MinCapacity: ${param:minTasks, 2}
+        MaxCapacity: ${param:maxTasks, 4}
+
+    N8NServiceCpuScalingPolicy:
+      Type: AWS::ApplicationAutoScaling::ScalingPolicy
+      Properties:
+        PolicyName: ${self:service}-${self:provider.stage}-n8n-cpu-scaling
+        PolicyType: TargetTrackingScaling
+        ScalingTargetId: !Ref N8NServiceScalableTarget
+        TargetTrackingScalingPolicyConfiguration:
+          TargetValue: 75.0
+          ScaleInCooldown: 300
+          ScaleOutCooldown: 60
+          PredefinedMetricSpecification:
+            PredefinedMetricType: ECSServiceAverageCPUUtilization
+
+    N8NServiceMemoryScalingPolicy:
+      Type: AWS::ApplicationAutoScaling::ScalingPolicy
+      Properties:
+        PolicyName: ${self:service}-${self:provider.stage}-n8n-memory-scaling
+        PolicyType: TargetTrackingScaling
+        ScalingTargetId: !Ref N8NServiceScalableTarget
+        TargetTrackingScalingPolicyConfiguration:
+          TargetValue: 75.0
+          ScaleInCooldown: 300
+          ScaleOutCooldown: 60
+          PredefinedMetricSpecification:
+            PredefinedMetricType: ECSServiceAverageMemoryUtilization
+    ECSClusterName:
+      Description: "Name of the ECS Cluster"
+      Value: !Ref ECSCluster
+      Export:
+        Name: ${self:service}-${self:provider.stage}-ECSClusterName
+    N8NTaskDefinitionArn:
+      Description: "ARN of the n8n Task Definition"
+      Value: !Ref N8NTaskDefinition
+      Export:
+        Name: ${self:service}-${self:provider.stage}-N8NTaskDefinitionArn
+    N8NFargateServiceName:
+      Description: "Name of the n8n Fargate Service"
+      Value: !GetAtt N8NFargateService.Name # Service name is an attribute
+      Export:
+        Name: ${self:service}-${self:provider.stage}-N8NFargateServiceName
+
+    # ECS Cluster
+    ECSCluster:
+      Type: AWS::ECS::Cluster
+      Properties:
+        ClusterName: ${self:service}-${self:provider.stage}-n8n-cluster
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-cluster
+
+    # CloudWatch Log Group for Fargate Tasks
+    N8NLogGroup:
+      Type: AWS::Logs::LogGroup
+      Properties:
+        LogGroupName: /ecs/${self:service}-${self:provider.stage}/n8n-app
+        RetentionInDays: ${param:logRetentionInDays, 7} # Allow parameterization of log retention
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-log-group
+
+    # Fargate Task Definition for n8n
+    N8NTaskDefinition:
+      Type: AWS::ECS::TaskDefinition
+      Properties:
+        Family: ${self:service}-${self:provider.stage}-n8n-app
+        NetworkMode: awsvpc
+        RequiresCompatibilities:
+          - FARGATE
+        Cpu: ${param:taskCpu, "1024"} # e.g., 1 vCPU
+        Memory: ${param:taskMemory, "2048"} # e.g., 2GB RAM
+        ExecutionRoleArn: !Ref FargateTaskExecutionRole
+        TaskRoleArn: !If [HasOptionalTaskRole, '${param:taskRoleArn}', !Ref "AWS::NoValue"]
+        ContainerDefinitions:
+          - Name: n8n # This name is referenced by the ECS Service LoadBalancer config
+            Image: ${param:n8nImageUrl, "docker.n8n.io/n8nio/n8n:latest"}
+            PortMappings:
+              - ContainerPort: 5678
+                Protocol: tcp
+            LogConfiguration:
+              LogDriver: awslogs
+              Options:
+                awslogs-group: !Ref N8NLogGroup
+                awslogs-region: !Ref AWS::Region
+                awslogs-stream-prefix: ecs-n8n # Stream prefix for n8n container logs
+            Environment:
+              - Name: NODE_ENV
+                Value: "production"
+              - Name: N8N_HOST
+                Value: ${param:n8nHostName} # Example: n8n.yourdomain.com
+              - Name: DB_TYPE
+                Value: "postgresdb"
+              - Name: DB_POSTGRESDB_HOST
+                Value: !GetAtt N8NPostgresDBInstance.Endpoint.Address
+              - Name: DB_POSTGRESDB_PORT
+                Value: !GetAtt N8NPostgresDBInstance.Endpoint.Port
+              - Name: DB_POSTGRESDB_DATABASE
+                Value: !GetAtt N8NPostgresDBInstance.DBName # This is the logical DB name from RDS setup
+              - Name: DB_POSTGRESDB_USER
+                Value: "n8nadmin" # This should match the MasterUsername in N8NPostgresDBInstance
+              - Name: EXECUTIONS_MODE
+                Value: ${param:executionsMode, "queue"}
+              - Name: TZ
+                Value: ${param:timezone, "America/New_York"}
+              - Name: N8N_EMAIL_MODE
+                Value: ${param:emailMode, "smtp"}
+              - Name: N8N_EMAIL_SMTP_HOST
+                Value: ${param:smtpHost, ""}
+              - Name: N8N_EMAIL_SMTP_PORT
+                Value: ${param:smtpPort, "587"}
+              - Name: N8N_EMAIL_SMTP_USER
+                Value: ${param:smtpUser, ""}
+              - Name: N8N_EMAIL_SMTP_SENDER
+                Value: ${param:smtpSender, ""}
+              # Add other n8n specific env vars as needed by user
+            Secrets:
+              - Name: DB_POSTGRESDB_PASSWORD
+                ValueFrom: !Ref N8NDBPasswordSecret # ARN of the RDS master password secret
+              - Name: N8N_ENCRYPTION_KEY
+                ValueFrom: !Ref N8NEncryptionKeySecret # ARN of the n8n encryption key secret
+              - Name: N8N_EMAIL_SMTP_PASSWORD
+                ValueFrom: !If [HasSmtpPasswordSecret, '${param:smtpPasswordSecretArnForTask}', !Ref "AWS::NoValue"]
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-task-def
+
+    # ECS Service for n8n on Fargate
+    N8NFargateService:
+      Type: AWS::ECS::Service
+      Properties:
+        ServiceName: ${self:service}-${self:provider.stage}-n8n-service
+        Cluster: !Ref ECSCluster
+        TaskDefinition: !Ref N8NTaskDefinition
+        DesiredCount: ${param:desiredTasks, 2}
+        LaunchType: FARGATE
+        NetworkConfiguration:
+          AwsvpcConfiguration:
+            Subnets:
+              - !Ref PrivateSubnet1
+              - !Ref PrivateSubnet2
+            SecurityGroups:
+              - !Ref FargateServiceSecurityGroup
+            AssignPublicIp: DISABLED # Tasks are in private subnets, use NAT Gateways
+        LoadBalancers:
+          - TargetGroupArn: !Ref ALBTargetGroup
+            ContainerName: "n8n" # Must match name in TaskDefinition.ContainerDefinitions
+            ContainerPort: 5678
+        EnableECSManagedTags: true
+        PropagateTags: SERVICE
+        DeploymentConfiguration:
+          MinimumHealthyPercent: 50 # Default is 100 for services with LB
+          MaximumPercent: 200 # Default is 200
+        HealthCheckGracePeriodSeconds: ${param:healthCheckGracePeriodSeconds, 60} # Optional, parameterize
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-n8n-fargate-service
+      DependsOn:
+        - ALBListenerHTTPS # Ensure listener is ready before service tries to register
+
+    # Auto Scaling for Fargate Service
+    N8NServiceScalableTarget:
+      Type: AWS::ApplicationAutoScaling::ScalableTarget
+      Properties:
+        ServiceNamespace: ecs
+        ResourceId: !Join ['', ['service/', !Ref ECSCluster, '/', !GetAtt N8NFargateService.Name]]
+        ScalableDimension: ecs:service:DesiredCount
+        MinCapacity: ${param:minTasks, 2}
+        MaxCapacity: ${param:maxTasks, 4}
+
+    N8NServiceCpuScalingPolicy:
+      Type: AWS::ApplicationAutoScaling::ScalingPolicy
+      Properties:
+        PolicyName: ${self:service}-${self:provider.stage}-n8n-cpu-scaling
+        PolicyType: TargetTrackingScaling
+        ScalingTargetId: !Ref N8NServiceScalableTarget
+        TargetTrackingScalingPolicyConfiguration:
+          TargetValue: 75.0
+          ScaleInCooldown: 300
+          ScaleOutCooldown: 60
+          PredefinedMetricSpecification:
+            PredefinedMetricType: ECSServiceAverageCPUUtilization
+
+    N8NServiceMemoryScalingPolicy:
+      Type: AWS::ApplicationAutoScaling::ScalingPolicy
+      Properties:
+        PolicyName: ${self:service}-${self:provider.stage}-n8n-memory-scaling
+        PolicyType: TargetTrackingScaling
+        ScalingTargetId: !Ref N8NServiceScalableTarget
+        TargetTrackingScalingPolicyConfiguration:
+          TargetValue: 75.0
+          ScaleInCooldown: 300
+          ScaleOutCooldown: 60
+          PredefinedMetricSpecification:
+            PredefinedMetricType: ECSServiceAverageMemoryUtilization
