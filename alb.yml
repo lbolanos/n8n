@@ -1,0 +1,71 @@
+Resources:
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "${ServiceName}-${Stage}-alb"
+      Scheme: internet-facing
+      IpAddressType: ipv4
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Subnets:
+        - !Ref VPCVPCPublicSubnet1
+        - !Ref VPCVPCPublicSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub "${ServiceName}-${Stage}-alb"
+
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${ServiceName}-${Stage}-n8n-tg"
+      VpcId: !Ref VPCVPC
+      Protocol: HTTP
+      Port: 5678
+      TargetType: ip
+      HealthCheck:
+        Enabled: true
+        Path: /healthz
+        Protocol: HTTP
+        Port: "traffic-port"
+        Matcher:
+          HttpCode: "200"
+        IntervalSeconds: 30
+        TimeoutSeconds: 5
+        HealthyThresholdCount: 2
+        UnhealthyThresholdCount: 2
+      Tags:
+        - Key: Name
+          Value: !Sub "${ServiceName}-${Stage}-n8n-target-group"
+
+  ALBListenerHTTPS:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Protocol: HTTPS
+      Port: 443
+      Certificates:
+        - CertificateArn: !Ref ACMCertificateArn
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Allow inbound traffic to ALB"
+      VpcId: !Ref VPCVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "${ServiceName}-${Stage}-alb-sg"

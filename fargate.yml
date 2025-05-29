@@ -1,0 +1,123 @@
+Resources:
+  N8NTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${ServiceName}-${Stage}-n8n-task-def"
+      Cpu: !Ref TaskCpu
+      Memory: !Ref TaskMemory
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !GetAtt FargateTaskExecutionRole.Arn
+      TaskRoleArn: !If [HasOptionalTaskRole, !Ref TaskRoleArn, !Ref "AWS::NoValue"]
+      ContainerDefinitions:
+        - Name: n8n
+          Image: !Ref N8NImageUrl
+          PortMappings:
+            - ContainerPort: 5678
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref N8NLogGroup
+              awslogs-region: !Ref AWSRegion
+              awslogs-stream-prefix: n8n
+          Environment:
+            - Name: DB_POSTGRESDB_HOST
+              Value: !GetAtt N8NPostgresDBInstance.Endpoint.Address
+            - Name: DB_POSTGRESDB_PORT
+              Value: !GetAtt N8NPostgresDBInstance.Endpoint.Port
+            - Name: DB_POSTGRESDB_DATABASE
+              Value: n8nDatabase
+            - Name: DB_POSTGRESDB_USER
+              Value: n8nadmin
+            - Name: EXECUTIONS_MODE
+              Value: !Ref ExecutionsMode
+            - Name: TZ
+              Value: !Ref Timezone
+            - Name: N8N_EMAIL_MODE
+              Value: !Ref EmailMode
+            - Name: N8N_EMAIL_SMTP_HOST
+              Value: !Ref SmtpHost
+            - Name: N8N_EMAIL_SMTP_PORT
+              Value: !Ref SmtpPort
+            - Name: N8N_EMAIL_SMTP_USER
+              Value: !Ref SmtpUser
+            - Name: N8N_EMAIL_SMTP_SENDER
+              Value: !Ref SmtpSender
+          Secrets:
+            - Name: DB_POSTGRESDB_PASSWORD
+              ValueFrom: !Ref N8NDBPasswordSecret
+            - Name: N8N_ENCRYPTION_KEY
+              ValueFrom: !Ref N8NEncryptionKeySecret
+            - Name: N8N_EMAIL_SMTP_PASSWORD
+              ValueFrom: !If [HasSmtpPasswordSecret, !Ref SmtpPasswordSecretArnForTask, !Ref "AWS::NoValue"]
+      Tags:
+        - Key: Name
+          Value: !Sub "${ServiceName}-${Stage}-n8n-task-def"
+
+  N8NFargateService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: !Sub "${ServiceName}-${Stage}-n8n-service"
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref N8NTaskDefinition
+      DesiredCount: !Ref DesiredTasks
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets:
+            - !Ref VPCVPCPrivateSubnet1
+            - !Ref VPCVPCPrivateSubnet2
+          SecurityGroups:
+            - !Ref FargateServiceSecurityGroup
+          AssignPublicIp: DISABLED
+      LoadBalancers:
+        - TargetGroupArn: !Ref ALBTargetGroup
+          ContainerName: "n8n"
+          ContainerPort: 5678
+      EnableECSManagedTags: true
+      PropagateTags: SERVICE
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 50
+        MaximumPercent: 200
+      HealthCheckGracePeriodSeconds: !Ref HealthCheckGracePeriodSeconds
+      Tags:
+        - Key: Name
+          Value: !Sub "${ServiceName}-${Stage}-n8n-fargate-service"
+    DependsOn:
+      - ALBListenerHTTPS
+
+  N8NServiceScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      ServiceNamespace: ecs
+      ResourceId: !Join ['', ['service/', !Ref ECSCluster, '/', !GetAtt N8NFargateService.Name]]
+      ScalableDimension: ecs:service:DesiredCount
+      MinCapacity: !Ref MinTasks
+      MaxCapacity: !Ref MaxTasks
+
+  N8NServiceCpuScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub "${ServiceName}-${Stage}-n8n-cpu-scaling"
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref N8NServiceScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 75.0
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 60
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+
+  N8NServiceMemoryScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub "${ServiceName}-${Stage}-n8n-memory-scaling"
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref N8NServiceScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 75.0
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 60
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageMemoryUtilization

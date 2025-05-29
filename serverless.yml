@@ -39,212 +39,59 @@ custom:
   #     taskRoleArn: "" # Optional: ARN of an IAM role for n8n tasks if they need to interact with other AWS services
 
 resources:
-  Conditions:
-    HasOptionalTaskRole: !Not [!Equals ['${param:taskRoleArn, ""}', ""]]
-    HasSmtpPasswordSecret: !Not [!Equals ['${param:smtpPasswordSecretArnForTask, ""}', ""]]
-
   Resources:
-    # VPC
-    VPC:
-      Type: AWS::EC2::VPC
-      Properties:
-        CidrBlock: 10.0.0.0/16
-        EnableDnsSupport: true
-        EnableDnsHostnames: true
-        Tags:
-          - Key: Name
-            Value: ${self:service}-${self:provider.stage}-vpc
-
-    # Subnets - Public (for ALB, NAT Gateways)
-    PublicSubnet1:
-      Type: AWS::EC2::Subnet
-      Properties:
-        VpcId: !Ref VPC
-        CidrBlock: 10.0.1.0/24
-        AvailabilityZone: ${self:custom.vpcAzs[0]}
-        MapPublicIpOnLaunch: true
-        Tags:
-          - Key: Name
-            Value: ${self:service}-${self:provider.stage}-public-subnet-1
-    PublicSubnet2:
-      Type: AWS::EC2::Subnet
-      Properties:
-        VpcId: !Ref VPC
-        CidrBlock: 10.0.2.0/24
-        AvailabilityZone: ${self:custom.vpcAzs[1]}
-        MapPublicIpOnLaunch: true
-        Tags:
-          - Key: Name
-            Value: ${self:service}-${self:provider.stage}-public-subnet-2
-
-    # Subnets - Private (for Fargate tasks, RDS)
-    PrivateSubnet1:
-      Type: AWS::EC2::Subnet
-      Properties:
-        VpcId: !Ref VPC
-        CidrBlock: 10.0.101.0/24
-        AvailabilityZone: ${self:custom.vpcAzs[0]}
-        MapPublicIpOnLaunch: false
-        Tags:
-          - Key: Name
-            Value: ${self:service}-${self:provider.stage}-private-subnet-1
-    PrivateSubnet2:
-      Type: AWS::EC2::Subnet
-      Properties:
-        VpcId: !Ref VPC
-        CidrBlock: 10.0.102.0/24
-        AvailabilityZone: ${self:custom.vpcAzs[1]}
-        MapPublicIpOnLaunch: false
-        Tags:
-          - Key: Name
-            Value: ${self:service}-${self:provider.stage}-private-subnet-2
-
-    # Internet Gateway
-    InternetGateway:
-      Type: AWS::EC2::InternetGateway
-      Properties:
-        Tags:
-          - Key: Name
-            Value: ${self:service}-${self:provider.stage}-igw
-    AttachGateway:
-      Type: AWS::EC2::VPCGatewayAttachment
-      Properties:
-        VpcId: !Ref VPC
-        InternetGatewayId: !Ref InternetGateway
-
-    # Elastic IPs for NAT Gateways
-    NatGateway1EIP:
-      Type: AWS::EC2::EIP
-      Properties:
-        Domain: vpc # Important for EIPs used by NAT Gateways
-        Tags:
-          - Key: Name
-            Value: ${self:service}-${self:provider.stage}-nat-eip-1
-    NatGateway2EIP:
-      Type: AWS::EC2::EIP
-      Properties:
-        Domain: vpc
-        Tags:
-          - Key: Name
-            Value: ${self:service}-${self:provider.stage}-nat-eip-2
-
-    # NAT Gateways
-    NatGateway1:
-      Type: AWS::EC2::NATGateway
-      Properties:
-        AllocationId: !GetAtt NatGateway1EIP.AllocationId
-        SubnetId: !Ref PublicSubnet1
-        Tags:
-          - Key: Name
-            Value: ${self:service}-${self:provider.stage}-nat-gw-1
-    NatGateway2:
-      Type: AWS::EC2::NATGateway
-      Properties:
-        AllocationId: !GetAtt NatGateway2EIP.AllocationId
-        SubnetId: !Ref PublicSubnet2
-        Tags:
-          - Key: Name
-            Value: ${self:service}-${self:provider.stage}-nat-gw-2
-
-    # Route Tables
-    PublicRouteTable:
-      Type: AWS::EC2::RouteTable
-      Properties:
-        VpcId: !Ref VPC
-        Tags:
-          - Key: Name
-            Value: ${self:service}-${self:provider.stage}-public-rt
-    DefaultPublicRoute:
-      Type: AWS::EC2::Route
-      DependsOn: AttachGateway # Ensure IGW is attached before adding route
-      Properties:
-        RouteTableId: !Ref PublicRouteTable
-        DestinationCidrBlock: 0.0.0.0/0
-        GatewayId: !Ref InternetGateway
-    PublicSubnet1RouteTableAssociation:
-      Type: AWS::EC2::SubnetRouteTableAssociation
-      Properties:
-        SubnetId: !Ref PublicSubnet1
-        RouteTableId: !Ref PublicRouteTable
-    PublicSubnet2RouteTableAssociation:
-      Type: AWS::EC2::SubnetRouteTableAssociation
-      Properties:
-        SubnetId: !Ref PublicSubnet2
-        RouteTableId: !Ref PublicRouteTable
-
-    PrivateRouteTable1:
-      Type: AWS::EC2::RouteTable
-      Properties:
-        VpcId: !Ref VPC
-        Tags:
-          - Key: Name
-            Value: ${self:service}-${self:provider.stage}-private-rt-1
-    DefaultPrivateRoute1:
-      Type: AWS::EC2::Route
-      Properties:
-        RouteTableId: !Ref PrivateRouteTable1
-        DestinationCidrBlock: 0.0.0.0/0
-        NatGatewayId: !Ref NatGateway1 # Route through NAT GW 1
-    PrivateSubnet1RouteTableAssociation:
-      Type: AWS::EC2::SubnetRouteTableAssociation
-      Properties:
-        SubnetId: !Ref PrivateSubnet1
-        RouteTableId: !Ref PrivateRouteTable1
-
-    PrivateRouteTable2:
-      Type: AWS::EC2::RouteTable
-      Properties:
-        VpcId: !Ref VPC
-        Tags:
-          - Key: Name
-            Value: ${self:service}-${self:provider.stage}-private-rt-2
-    DefaultPrivateRoute2:
-      Type: AWS::EC2::Route
-      Properties:
-        RouteTableId: !Ref PrivateRouteTable2
-        DestinationCidrBlock: 0.0.0.0/0
-        NatGatewayId: !Ref NatGateway2 # Route through NAT GW 2
-    PrivateSubnet2RouteTableAssociation:
-      Type: AWS::EC2::SubnetRouteTableAssociation
-      Properties:
-        SubnetId: !Ref PrivateSubnet2
-        RouteTableId: !Ref PrivateRouteTable2
-
+    ${file(./vpc.yml)}
+    ${file(./rds.yml)}
+    ${file(./alb.yml)}
+    ${file(./ecs.yml)}
+    ${file(./fargate.yml)}
+    ${file(./secrets.yml)}
+  Conditions:
+    HasOptionalTaskRole:
+      Fn::Not:
+        - Fn::Equals:
+            - "${param:taskRoleArn, ''}"
+            - ""
+    HasSmtpPasswordSecret:
+      Fn::Not:
+        - Fn::Equals:
+            - "${param:smtpPasswordSecretArnForTask, ''}"
+            - ""
   Outputs:
     VPCId:
       Description: "ID of the new VPC"
-      Value: !Ref VPC
+      Value: !Ref VPCVPC
       Export:
         Name: ${self:service}-${self:provider.stage}-VPCId
     PublicSubnetOneId:
       Description: "ID of Public Subnet 1"
-      Value: !Ref PublicSubnet1
+      Value: !Ref VPCVPCPublicSubnet1
       Export:
         Name: ${self:service}-${self:provider.stage}-PublicSubnetOneId
     PublicSubnetTwoId:
       Description: "ID of Public Subnet 2"
-      Value: !Ref PublicSubnet2
+      Value: !Ref VPCVPCPublicSubnet2
       Export:
         Name: ${self:service}-${self:provider.stage}-PublicSubnetTwoId
     PrivateSubnetOneId:
       Description: "ID of Private Subnet 1"
-      Value: !Ref PrivateSubnet1
+      Value: !Ref VPCVPCPrivateSubnet1
       Export:
         Name: ${self:service}-${self:provider.stage}-PrivateSubnetOneId
     PrivateSubnetTwoId:
       Description: "ID of Private Subnet 2"
-      Value: !Ref PrivateSubnet2
+      Value: !Ref VPCVPCPrivateSubnet2
       Export:
         Name: ${self:service}-${self:provider.stage}-PrivateSubnetTwoId
     # Outputting all subnet IDs as a list can also be useful
     AllPublicSubnetIds:
       Description: "Comma-delimited list of Public Subnet IDs"
-      Value: !Join [",", [!Ref PublicSubnet1, !Ref PublicSubnet2]]
+      Value: !Join [",", [!Ref VPCVPCPublicSubnet1, !Ref VPCVPCPublicSubnet2]]
       Export:
         Name: ${self:service}-${self:provider.stage}-AllPublicSubnetIds
     AllPrivateSubnetIds:
       Description: "Comma-delimited list of Private Subnet IDs"
-      Value: !Join [",", [!Ref PrivateSubnet1, !Ref PrivateSubnet2]]
+      Value: !Join [",", [!Ref VPCVPCPrivateSubnet1, !Ref VPCVPCPrivateSubnet2]]
       Export:
         Name: ${self:service}-${self:provider.stage}-AllPrivateSubnetIds
 
@@ -299,8 +146,8 @@ resources:
       Properties:
         DBSubnetGroupDescription: "Subnet group for n8n RDS instance"
         SubnetIds: # Reference the private subnets created earlier
-          - !Ref PrivateSubnet1
-          - !Ref PrivateSubnet2
+          - !Ref VPCVPCPrivateSubnet1
+          - !Ref VPCVPCPrivateSubnet2
         Tags:
           - Key: Name
             Value: ${self:service}-${self:provider.stage}-db-subnet-group
@@ -333,7 +180,7 @@ resources:
       Type: AWS::EC2::SecurityGroup
       Properties:
         GroupDescription: "Security group for n8n ALB"
-        VpcId: !Ref VPC
+        VpcId: !Ref VPCVPC
         SecurityGroupIngress:
           - IpProtocol: tcp
             FromPort: 443 # HTTPS
@@ -347,7 +194,7 @@ resources:
       Type: AWS::EC2::SecurityGroup
       Properties:
         GroupDescription: "Security group for n8n Fargate service"
-        VpcId: !Ref VPC
+        VpcId: !Ref VPCVPC
         SecurityGroupIngress: # Allow inbound from ALB on n8n port
           - IpProtocol: tcp
             FromPort: 5678 # n8n application port
@@ -364,7 +211,7 @@ resources:
       Type: AWS::EC2::SecurityGroup
       Properties:
         GroupDescription: "Security Group for n8n RDS instance"
-        VpcId: !Ref VPC
+        VpcId: !Ref VPCVPC
         SecurityGroupIngress:
           - IpProtocol: tcp
             FromPort: 5432 # PostgreSQL port
@@ -405,58 +252,6 @@ resources:
             Value: ${self:service}-${self:provider.stage}-n8n-db
       # DependsOn:
         # - DBParameterGroup # Implicit dependency
-  Outputs:
-    VPCId:
-      Description: "ID of the new VPC"
-      Value: !Ref VPC
-      Export:
-        Name: ${self:service}-${self:provider.stage}-VPCId
-    PublicSubnetOneId:
-      Description: "ID of Public Subnet 1"
-      Value: !Ref PublicSubnet1
-      Export:
-        Name: ${self:service}-${self:provider.stage}-PublicSubnetOneId
-    PublicSubnetTwoId:
-      Description: "ID of Public Subnet 2"
-      Value: !Ref PublicSubnet2
-      Export:
-        Name: ${self:service}-${self:provider.stage}-PublicSubnetTwoId
-    PrivateSubnetOneId:
-      Description: "ID of Private Subnet 1"
-      Value: !Ref PrivateSubnet1
-      Export:
-        Name: ${self:service}-${self:provider.stage}-PrivateSubnetOneId
-    PrivateSubnetTwoId:
-      Description: "ID of Private Subnet 2"
-      Value: !Ref PrivateSubnet2
-      Export:
-        Name: ${self:service}-${self:provider.stage}-PrivateSubnetTwoId
-    # Outputting all subnet IDs as a list can also be useful
-    AllPublicSubnetIds:
-      Description: "Comma-delimited list of Public Subnet IDs"
-      Value: !Join [",", [!Ref PublicSubnet1, !Ref PublicSubnet2]]
-      Export:
-        Name: ${self:service}-${self:provider.stage}-AllPublicSubnetIds
-    AllPrivateSubnetIds:
-      Description: "Comma-delimited list of Private Subnet IDs"
-      Value: !Join [",", [!Ref PrivateSubnet1, !Ref PrivateSubnet2]]
-      Export:
-        Name: ${self:service}-${self:provider.stage}-AllPrivateSubnetIds
-    N8NDBPasswordSecretArn:
-      Description: "ARN of the RDS master password secret"
-      Value: !Ref N8NDBPasswordSecret
-      Export:
-        Name: ${self:service}-${self:provider.stage}-N8NDBPasswordSecretArn
-    N8NEncryptionKeySecretArn:
-      Description: "ARN of the n8n encryption key secret"
-      Value: !Ref N8NEncryptionKeySecret
-      Export:
-        Name: ${self:service}-${self:provider.stage}-N8NEncryptionKeySecretArn
-    N8NSmtpPasswordSecretArn:
-      Description: "ARN of the SMTP password secret (if used)"
-      Value: !Ref N8NSmtpPasswordSecret
-      Export:
-        Name: ${self:service}-${self:provider.stage}-N8NSmtpPasswordSecretArn
     ALBSecurityGroupId:
       Description: "ID of the ALB Security Group"
       Value: !GetAtt ALBSecurityGroup.GroupId
@@ -506,8 +301,8 @@ resources:
         SecurityGroups:
           - !Ref ALBSecurityGroup # Defined in previous step
         Subnets: # Use the public subnets
-          - !Ref PublicSubnet1
-          - !Ref PublicSubnet2
+          - !Ref VPCVPCPublicSubnet1
+          - !Ref VPCVPCPublicSubnet2
         Tags:
           - Key: Name
             Value: ${self:service}-${self:provider.stage}-alb
@@ -516,7 +311,7 @@ resources:
       Type: AWS::ElasticLoadBalancingV2::TargetGroup
       Properties:
         Name: ${self:service}-${self:provider.stage}-n8n-tg
-        VpcId: !Ref VPC
+        VpcId: !Ref VPCVPC
         Protocol: HTTP
         Port: 5678 # n8n container port
         TargetType: ip # Required for Fargate
@@ -688,8 +483,8 @@ resources:
         NetworkConfiguration:
           AwsvpcConfiguration:
             Subnets:
-              - !Ref PrivateSubnet1
-              - !Ref PrivateSubnet2
+              - !Ref VPCVPCPrivateSubnet1
+              - !Ref VPCVPCPrivateSubnet2
             SecurityGroups:
               - !Ref FargateServiceSecurityGroup
             AssignPublicIp: DISABLED # Corrected
@@ -855,8 +650,8 @@ resources:
         NetworkConfiguration:
           AwsvpcConfiguration:
             Subnets:
-              - !Ref PrivateSubnet1
-              - !Ref PrivateSubnet2
+              - !Ref VPCVPCPrivateSubnet1
+              - !Ref VPCVPCPrivateSubnet2
             SecurityGroups:
               - !Ref FargateServiceSecurityGroup
             AssignPublicIp: DISABLED # Corrected
@@ -1022,8 +817,8 @@ resources:
         NetworkConfiguration:
           AwsvpcConfiguration:
             Subnets:
-              - !Ref PrivateSubnet1
-              - !Ref PrivateSubnet2
+              - !Ref VPCVPCPrivateSubnet1
+              - !Ref VPCVPCPrivateSubnet2
             SecurityGroups:
               - !Ref FargateServiceSecurityGroup
             AssignPublicIp: DISABLED # Corrected
@@ -1189,8 +984,8 @@ resources:
         NetworkConfiguration:
           AwsvpcConfiguration:
             Subnets:
-              - !Ref PrivateSubnet1
-              - !Ref PrivateSubnet2
+              - !Ref VPCVPCPrivateSubnet1
+              - !Ref VPCVPCPrivateSubnet2
             SecurityGroups:
               - !Ref FargateServiceSecurityGroup
             AssignPublicIp: DISABLED # Corrected
@@ -1356,8 +1151,8 @@ resources:
         NetworkConfiguration:
           AwsvpcConfiguration:
             Subnets:
-              - !Ref PrivateSubnet1
-              - !Ref PrivateSubnet2
+              - !Ref VPCVPCPrivateSubnet1
+              - !Ref VPCVPCPrivateSubnet2
             SecurityGroups:
               - !Ref FargateServiceSecurityGroup
             AssignPublicIp: DISABLED # Corrected
@@ -1523,8 +1318,8 @@ resources:
         NetworkConfiguration:
           AwsvpcConfiguration:
             Subnets:
-              - !Ref PrivateSubnet1
-              - !Ref PrivateSubnet2
+              - !Ref VPCVPCPrivateSubnet1
+              - !Ref VPCVPCPrivateSubnet2
             SecurityGroups:
               - !Ref FargateServiceSecurityGroup
             AssignPublicIp: DISABLED # Corrected
@@ -1690,8 +1485,8 @@ resources:
         NetworkConfiguration:
           AwsvpcConfiguration:
             Subnets:
-              - !Ref PrivateSubnet1
-              - !Ref PrivateSubnet2
+              - !Ref VPCVPCPrivateSubnet1
+              - !Ref VPCVPCPrivateSubnet2
             SecurityGroups:
               - !Ref FargateServiceSecurityGroup
             AssignPublicIp: DISABLED # Corrected
@@ -1857,8 +1652,8 @@ resources:
         NetworkConfiguration:
           AwsvpcConfiguration:
             Subnets:
-              - !Ref PrivateSubnet1
-              - !Ref PrivateSubnet2
+              - !Ref VPCVPCPrivateSubnet1
+              - !Ref VPCVPCPrivateSubnet2
             SecurityGroups:
               - !Ref FargateServiceSecurityGroup
             AssignPublicIp: DISABLED # Corrected
@@ -2024,8 +1819,8 @@ resources:
         NetworkConfiguration:
           AwsvpcConfiguration:
             Subnets:
-              - !Ref PrivateSubnet1
-              - !Ref PrivateSubnet2
+              - !Ref VPCVPCPrivateSubnet1
+              - !Ref VPCVPCPrivateSubnet2
             SecurityGroups:
               - !Ref FargateServiceSecurityGroup
             AssignPublicIp: DISABLED # Corrected
@@ -2191,8 +1986,8 @@ resources:
         NetworkConfiguration:
           AwsvpcConfiguration:
             Subnets:
-              - !Ref PrivateSubnet1
-              - !Ref PrivateSubnet2
+              - !Ref VPCVPCPrivateSubnet1
+              - !Ref VPCVPCPrivateSubnet2
             SecurityGroups:
               - !Ref FargateServiceSecurityGroup
             AssignPublicIp: DISABLED # Corrected
@@ -2358,8 +2153,8 @@ resources:
         NetworkConfiguration:
           AwsvpcConfiguration:
             Subnets:
-              - !Ref PrivateSubnet1
-              - !Ref PrivateSubnet2
+              - !Ref VPCVPCPrivateSubnet1
+              - !Ref VPCVPCPrivateSubnet2
             SecurityGroups:
               - !Ref FargateServiceSecurityGroup
             AssignPublicIp: DISABLED # Corrected
@@ -2525,8 +2320,8 @@ resources:
         NetworkConfiguration:
           AwsvpcConfiguration:
             Subnets:
-              - !Ref PrivateSubnet1
-              - !Ref PrivateSubnet2
+              - !Ref VPCVPCPrivateSubnet1
+              - !Ref VPCVPCPrivateSubnet2
             SecurityGroups:
               - !Ref FargateServiceSecurityGroup
             AssignPublicIp: DISABLED # Corrected
@@ -2692,8 +2487,8 @@ resources:
         NetworkConfiguration:
           AwsvpcConfiguration:
             Subnets:
-              - !Ref PrivateSubnet1
-              - !Ref PrivateSubnet2
+              - !Ref VPCVPCPrivateSubnet1
+              - !Ref VPCVPCPrivateSubnet2
             SecurityGroups:
               - !Ref FargateServiceSecurityGroup
             AssignPublicIp: DISABLED # Corrected
@@ -2859,8 +2654,8 @@ resources:
         NetworkConfiguration:
           AwsvpcConfiguration:
             Subnets:
-              - !Ref PrivateSubnet1
-              - !Ref PrivateSubnet2
+              - !Ref VPCVPCPrivateSubnet1
+              - !Ref VPCVPCPrivateSubnet2
             SecurityGroups:
               - !Ref FargateServiceSecurityGroup
             AssignPublicIp: DISABLED # Corrected
@@ -3026,8 +2821,8 @@ resources:
         NetworkConfiguration:
           AwsvpcConfiguration:
             Subnets:
-              - !Ref PrivateSubnet1
-              - !Ref PrivateSubnet2
+              - !Ref VPCVPCPrivateSubnet1
+              - !Ref VPCVPCPrivateSubnet2
             SecurityGroups:
               - !Ref FargateServiceSecurityGroup
             AssignPublicIp: DISABLED # Corrected
@@ -3194,8 +2989,8 @@ resources:
         NetworkConfiguration:
           AwsvpcConfiguration:
             Subnets:
-              - !Ref PrivateSubnet1
-              - !Ref PrivateSubnet2
+              - !Ref VPCVPCPrivateSubnet1
+              - !Ref VPCVPCPrivateSubnet2
             SecurityGroups:
               - !Ref FargateServiceSecurityGroup
             AssignPublicIp: DISABLED # Tasks are in private subnets, use NAT Gateways

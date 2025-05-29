@@ -1,0 +1,64 @@
+Resources:
+  N8NPostgresDBInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBName: n8nDatabase # Or make this a parameter
+      Engine: postgres
+      EngineVersion: "15.5"
+      DBInstanceClass: db.t3.medium
+      AllocatedStorage: "100"
+      StorageType: gp3
+      MasterUsername: n8nadmin
+      MasterUserPassword: !Join ['', ['{{resolve:secretsmanager:', !Ref N8NDBPasswordSecret, ':SecretString:password}}']]
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      DBParameterGroupName: !Ref DBParameterGroup
+      VPCSecurityGroups:
+        - !Ref RDSSecurityGroup
+      MultiAZ: true
+      PubliclyAccessible: false
+      BackupRetentionPeriod: 7
+      PreferredBackupWindow: "03:00-04:00"
+      PreferredMaintenanceWindow: "sun:04:00-sun:05:00"
+      StorageEncrypted: true
+      CopyTagsToSnapshot: true
+      DeleteAutomatedBackups: false
+      DeletionPolicy: Snapshot
+      Tags:
+        - Key: Name
+          Value: !Sub "${ServiceName}-${Stage}-n8n-db"
+
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: "Subnets for n8n RDS instance"
+      SubnetIds:
+        - !Ref VPCVPCPrivateSubnet1
+        - !Ref VPCVPCPrivateSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub "${ServiceName}-${Stage}-db-subnet-group"
+
+  DBParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: "Parameter group for n8n RDS PostgreSQL with pgvector considerations"
+      Family: postgres15
+      Parameters:
+        rds.logical_replication: "1"
+      Tags:
+        - Key: Name
+          Value: !Sub "${ServiceName}-${Stage}-db-param-group"
+
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Allow n8n Fargate tasks to access RDS"
+      VpcId: !Ref VPCVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !GetAtt FargateServiceSecurityGroup.GroupId
+      Tags:
+        - Key: Name
+          Value: !Sub "${ServiceName}-${Stage}-rds-sg"

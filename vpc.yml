@@ -1,0 +1,164 @@
+Resources:
+  VPCVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: ${self:service}-${self:provider.stage}-vpc
+
+  VPCPublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPCVPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: ${self:custom.vpcAzs[0]}
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: ${self:service}-${self:provider.stage}-vpc-public-subnet-1
+
+  VPCPublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPCVPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: ${self:custom.vpcAzs[1]}
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: ${self:service}-${self:provider.stage}-vpc-public-subnet-2
+
+  VPCVPCPrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPCVPC
+      CidrBlock: 10.0.101.0/24
+      AvailabilityZone: ${self:custom.vpcAzs[0]}
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: ${self:service}-${self:provider.stage}-vpc-private-subnet-1
+
+  VPCVPCPrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPCVPC
+      CidrBlock: 10.0.102.0/24
+      AvailabilityZone: ${self:custom.vpcAzs[1]}
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: ${self:service}-${self:provider.stage}-vpc-private-subnet-2
+
+  VPCVPCInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: ${self:service}-${self:provider.stage}-vpc-igw
+
+  VPCVPCAttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPCVPC
+      InternetGatewayId: !Ref VPCVPCInternetGateway
+
+  VPCVPCNatGateway1EIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  VPCVPCNatGateway2EIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  VPCVPCNatGateway1:
+    Type: AWS::EC2::NATGateway
+    Properties:
+      AllocationId: !GetAtt VPCVPCNatGateway1EIP.AllocationId
+      SubnetId: !Ref VPCVPCPublicSubnet1
+      Tags:
+        - Key: Name
+          Value: ${self:service}-${self:provider.stage}-vpc-nat-gw-1
+
+  VPCVPCNatGateway2:
+    Type: AWS::EC2::NATGateway
+    Properties:
+      AllocationId: !GetAtt VPCVPCNatGateway2EIP.AllocationId
+      SubnetId: !Ref VPCVPCPublicSubnet2
+      Tags:
+        - Key: Name
+          Value: ${self:service}-${self:provider.stage}-vpc-nat-gw-2
+
+  VPCVPCPublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPCVPC
+      Tags:
+        - Key: Name
+          Value: ${self:service}-${self:provider.stage}-vpc-public-rt
+
+  VPCVPCPublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref VPCVPCPublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref VPCVPCInternetGateway
+
+  VPCVPCPublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref VPCVPCPublicSubnet1
+      RouteTableId: !Ref VPCVPCPublicRouteTable
+
+  VPCVPCPublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref VPCVPCPublicSubnet2
+      RouteTableId: !Ref VPCVPCPublicRouteTable
+
+  VPCVPCPrivateRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPCVPC
+      Tags:
+        - Key: Name
+          Value: ${self:service}-${self:provider.stage}-vpc-private-rt-1
+
+  VPCVPCPrivateRouteTable2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPCVPC
+      Tags:
+        - Key: Name
+          Value: ${self:service}-${self:provider.stage}-vpc-private-rt-2
+
+  VPCVPCDefaultPrivateRoute1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref VPCVPCPrivateRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref VPCVPCNatGateway1
+
+  VPCVPCDefaultPrivateRoute2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref VPCVPCPrivateRouteTable2
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref VPCVPCNatGateway2
+
+  VPCVPCPrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref VPCVPCPrivateSubnet1
+      RouteTableId: !Ref VPCVPCPrivateRouteTable1
+
+  VPCVPCPrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref VPCVPCPrivateSubnet2
+      RouteTableId: !Ref VPCVPCPrivateRouteTable2
