@@ -22,4 +22,4 @@ resources:
   - ${file(../resources/rds.yml)}
   - ${file(../resources/iam.yml)}
   - ${file(../resources/alb.yml)}
-  #- ${file(../resources/secrets.yml)}
+

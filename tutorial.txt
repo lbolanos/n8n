@@ -1,0 +1,113 @@
+List of relations
+ Schema |            Name            | Type  |   Owner    
+--------+----------------------------+-------+------------
+ public | annotation_tag_entity      | table | flux_admin
+ public | auth_identity              | table | flux_admin
+ public | auth_provider_sync_history | table | flux_admin
+ public | credentials_entity         | table | flux_admin
+ public | event_destinations         | table | flux_admin
+ public | execution_annotation_tags  | table | flux_admin
+ public | execution_annotations      | table | flux_admin
+ public | execution_data             | table | flux_admin
+ public | execution_entity           | table | flux_admin
+ public | execution_metadata         | table | flux_admin
+ public | folder                     | table | flux_admin
+ public | folder_tag                 | table | flux_admin
+ public | insights_by_period         | table | flux_admin
+ public | insights_metadata          | table | flux_admin
+ public | insights_raw               | table | flux_admin
+ public | installed_nodes            | table | flux_admin
+ public | installed_packages         | table | flux_admin
+ public | invalid_auth_token         | table | flux_admin
+ public | migrations                 | table | flux_admin
+ public | processed_data             | table | flux_admin
+ public | project                    | table | flux_admin
+ public | project_relation           | table | flux_admin
+ public | settings                   | table | flux_admin
+ public | shared_credentials         | table | flux_admin
+ public | shared_workflow            | table | flux_admin
+ public | tag_entity                 | table | flux_admin
+ public | test_case_execution        | table | flux_admin
+ public | test_definition            | table | flux_admin
+ public | test_metric                | table | flux_admin
+ public | test_run                   | table | flux_admin
+ public | user                       | table | flux_admin
+ public | user_api_keys              | table | flux_admin
+ public | variables                  | table | flux_admin
+ public | webhook_entity             | table | flux_admin
+ public | workflow_entity            | table | flux_admin
+ public | workflow_history           | table | flux_admin
+ public | workflow_statistics        | table | flux_admin
+ public | workflows_tags             | table | flux_admin
+ 
+ 
+ 
+Here’s an explanation of each table in your n8n database schema, based on standard n8n (and some enterprise) setups. Some tables are core to n8n, while others are related to advanced features like annotation, test automation, or multi-user/project support.
+
+Table-by-Table Explanation
+Core Workflow Tables
+workflow_entity: Stores workflow definitions (nodes, connections, settings, etc.).
+workflow_history: Keeps a history of workflow changes for audit/versioning.
+workflow_statistics: Aggregated statistics about workflow executions (success, failure, duration, etc.).
+workflows_tags: Many-to-many mapping between workflows and tags.
+Execution & Data Tables
+execution_entity: Stores metadata about each workflow execution (status, timestamps, workflow reference).
+execution_data: Stores the input/output data for each execution (can be large blobs).
+execution_metadata: Additional metadata for executions (custom fields, etc.).
+execution_annotations: Stores annotations (comments, notes) added to executions.
+execution_annotation_tags: Tags assigned to execution annotations.
+User & Auth Tables
+user: Stores user accounts.
+user_api_keys: API keys for users (for programmatic access).
+invalid_auth_token: Stores invalidated tokens (for security/revocation).
+auth_identity: Identity provider records for users (SSO, OAuth, etc.).
+auth_provider_sync_history: Tracks synchronization events with external auth providers.
+Credentials & Sharing
+credentials_entity: Encrypted credentials for external services.
+shared_credentials: Which users have access to which credentials.
+shared_workflow: Which users have access to which workflows.
+Tagging & Organization
+tag_entity: Tag definitions.
+annotation_tag_entity: Tag definitions specifically for annotations.
+folder: Folders for organizing workflows/credentials.
+folder_tag: Tags assigned to folders.
+Webhooks & Variables
+webhook_entity: Stores registered webhooks for workflows.
+variables: Stores global/environment variables for workflows.
+Settings & System
+settings: Global n8n settings/configuration.
+installed_nodes: Tracks custom nodes installed in the instance.
+installed_packages: Tracks npm packages installed for custom nodes.
+migrations: Tracks database schema migrations.
+Projects & Multi-Tenancy (Enterprise)
+project: Project definitions (for multi-project/tenant setups).
+project_relation: Relations between projects and other entities (users, workflows, etc.).
+event_destinations: Where events (logs, notifications) are sent for a project.
+Insights & Analytics (Enterprise)
+insights_by_period: Aggregated analytics by period (day, week, etc.).
+insights_metadata: Metadata about analytics/insights.
+insights_raw: Raw analytics data.
+processed_data: Data processed for analytics/insights.
+Test Automation (Enterprise)
+test_case_execution: Stores executions of test cases.
+test_definition: Test case definitions.
+test_metric: Metrics collected from test runs.
+test_run: Records of test runs.
+
+
+
+Get paid features for free (forever)
+Receive a free activation key for the advanced features below - lifetime access.
+
+🕰️
+Workflow history
+Review and restore any workflow version from the last 24 hours
+🐞
+Advanced debugging
+Easily fix any workflow execution that’s errored, then re-run it
+🔎
+Execution search and tagging
+Search and organize past workflow executions for easier review
+📁
+Folders
+Organize your workflows in a nested folder structure

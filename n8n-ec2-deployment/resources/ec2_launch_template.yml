@@ -108,7 +108,7 @@ Resources:
               --restart always \
               -p 5678:5678 \
               -v ${N8N_LOCAL_DATA_DIR}:/home/node/.n8n \
-              -e DB_TYPE=postgres \
+              -e DB_TYPE=postgresdb \
               -e DB_POSTGRESDB_HOST="${POSTGRES_DB_HOST}" \
               -e DB_POSTGRESDB_USER="${POSTGRES_USER}" \
               -e DB_POSTGRESDB_DATABASE="${POSTGRES_DB_NAME}" \
@@ -116,12 +116,18 @@ Resources:
               -e N8N_ENCRYPTION_KEY="${N8N_ENCRYPTION_KEY}" \
               -e GENERIC_TIMEZONE="America/Bogota" \
               -e WEBHOOK_URL="https://flux.getgik.com/" \
+              -e N8N_RUNNERS_ENABLED="true" \
+              -e N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS="true" \
               n8nio/n8n:${N8N_VERSION}
+
+            # Get n8n Docker container ID
+            N8N_CONTAINER_ID=$(docker inspect --format='{{.Id}}' n8n_container)
+            N8N_DOCKER_LOG_PATH="/var/lib/docker/containers/${N8N_CONTAINER_ID}/${N8N_CONTAINER_ID}-json.log"
 
             # Install CloudWatch Agent
             yum install -y amazon-cloudwatch-agent
 
-            # CloudWatch Agent config
+            # CloudWatch Agent config (dynamic for n8n container log)
             cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<EOF
             {
               "logs": {
@@ -137,6 +143,11 @@ Resources:
                         "file_path": "/var/log/docker.log",
                         "log_group_name": "/aws/ec2/n8n/${self:custom.stage}",
                         "log_stream_name": "{instance_id}/docker"
+                      },
+                      {
+                        "file_path": "${N8N_DOCKER_LOG_PATH}",
+                        "log_group_name": "/aws/ec2/n8n/${self:custom.stage}",
+                        "log_stream_name": "{instance_id}/n8n-docker"
                       }
                     ]
                   }

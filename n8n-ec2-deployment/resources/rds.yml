@@ -33,6 +33,7 @@ Resources:
     Properties:
       DeletionProtection: !If [IsProd, true, false]
       Engine: aurora-postgresql
+      Port: 5432
       EngineVersion: "15.3" # Check AWS for latest supported version
       DBClusterIdentifier: n8n-aurora-cluster-${self:custom.stage}
       DatabaseName: n8ndb
@@ -40,7 +41,7 @@ Resources:
       MasterUserPassword: !Join [ '', [ '{{resolve:secretsmanager:', !Ref N8NAuroraDBSecret, ':SecretString:password}}' ] ]
       DBSubnetGroupName: !Ref N8NDBSubnetGroup
       VpcSecurityGroupIds:
-        - !Ref N8NEC2SecurityGroup
+        - !Ref N8NRDSSecurityGroup
       BackupRetentionPeriod: 7
       StorageEncrypted: true
       #EnableHttpEndpoint: true
