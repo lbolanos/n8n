@@ -1,0 +1,100 @@
+# resources/ec2_launch_template.yml
+Parameters:
+  LatestAmiId: # Parameter for the AMI ID
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Description: The latest Amazon Linux 2023 AMI ID for x86_64.
+    Default: '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64' # Using SSM Parameter Store to fetch latest AL2023
+  InstanceType:
+    Type: String
+    Description: EC2 instance type for the application.
+    Default: t3.micro
+  # Add KeyName if you need direct SSH access with a key pair
+  # KeyName:
+  #   Type: AWS::EC2::KeyPair::KeyName
+  #   Description: Name of an existing EC2 KeyPair to enable SSH access to the instances. (Optional, SSM Session Manager is preferred)
+
+Resources:
+  N8nLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: ${self:service}-${self:provider.stage}-n8n-lt
+      LaunchTemplateData:
+        ImageId: !Ref LatestAmiId
+        InstanceType: !Ref InstanceType
+        # KeyName: !Ref KeyName # Uncomment if using KeyPair for SSH
+        IamInstanceProfile:
+          Arn: !ImportValue ${self:service}-${self:provider.stage}-EC2InstanceProfileArn # Import from iam_roles.yml output
+        SecurityGroupIds:
+          - !ImportValue ${self:service}-${self:provider.stage}-InstanceSecurityGroupId # Import from ec2_security_groups.yml output
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: ${self:service}-${self:provider.stage}-n8n-instance
+              - Key: Stage
+                Value: ${self:provider.stage}
+          - ResourceType: volume # Also tag EBS volumes
+            Tags:
+              - Key: Name
+                Value: ${self:service}-${self:provider.stage}-n8n-volume
+              - Key: Stage
+                Value: ${self:provider.stage}
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            # Install Docker
+            yum update -y
+            yum install -y docker
+            systemctl start docker
+            systemctl enable docker
+            usermod -a -G docker ec2-user # Add ec2-user to the docker group
+
+            # Install AWS CLI v2 (comes pre-installed on Amazon Linux 2023, but good to have if using other AMIs)
+            # curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+            # unzip awscliv2.zip
+            # ./aws/install
+
+            # Log in to ECR
+            # The ECR repository name is imported from the ECR stack output
+            # The region is the one this stack is deployed to
+            ECR_REPOSITORY_URI=$(aws cloudformation describe-stacks --stack-name ${AWS::StackName} --query "Stacks[0].Outputs[?OutputKey=='N8nEcrRepositoryUri'].OutputValue" --output text --region ${AWS::Region})
+            # Fallback in case the output is not found directly (e.g. during initial creation or if naming changes)
+            if [ -z "$ECR_REPOSITORY_URI" ]; then
+              ECR_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text --region ${AWS::Region})
+              ECR_REPOSITORY_NAME_FROM_OUTPUT=$(aws cloudformation describe-stacks --stack-name ${AWS::StackName} --query "Stacks[0].Outputs[?OutputKey=='N8nEcrRepositoryName'].OutputValue" --output text --region ${AWS::Region})
+              ECR_REPOSITORY_URI="${ECR_ACCOUNT_ID}.dkr.ecr.${AWS::Region}.amazonaws.com/${ECR_REPOSITORY_NAME_FROM_OUTPUT}"
+            fi
+
+            aws ecr get-login-password --region ${AWS::Region} | docker login --username AWS --password-stdin $ECR_REPOSITORY_URI
+
+            # Pull and run the Docker image
+            # Replace 'latest' with a specific tag if desired
+            IMAGE_TAG="latest"
+            DOCKER_IMAGE_URI="${ECR_REPOSITORY_URI}:${IMAGE_TAG}"
+
+            docker pull $DOCKER_IMAGE_URI
+
+            # Example: Run n8n container
+            # Users should customize environment variables and volume mounts as needed.
+            # The port 5678 is n8n's default.
+            docker run -d --name n8n_app -p 5678:5678 \
+              --restart unless-stopped \
+              -e NODE_ENV=production \
+              -e N8N_HOST="0.0.0.0" \
+              # -e WEBHOOK_URL="https://${self:custom.domainName}/" # Example, if using a custom domain with ALB
+              # -v /home/ec2-user/.n8n:/home/node/.n8n # Example volume mount for persistent data
+              $DOCKER_IMAGE_URI
+
+            # You can add more application-specific setup here
+            echo "N8N container started."
+Outputs:
+  N8nLaunchTemplateId:
+    Description: ID of the N8N EC2 Launch Template
+    Value: !Ref N8nLaunchTemplate
+    Export:
+      Name: ${self:service}-${self:provider.stage}-N8nLaunchTemplateId
+  N8nLaunchTemplateVersion:
+    Description: Latest version number of the N8N EC2 Launch Template
+    Value: !GetAtt N8nLaunchTemplate.LatestVersionNumber
+    Export:
+      Name: ${self:service}-${self:provider.stage}-N8nLaunchTemplateVersion

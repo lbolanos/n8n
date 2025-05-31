@@ -1,0 +1,62 @@
+# resources/iam_roles.yml
+Resources:
+  # IAM Role for EC2 Instances
+  EC2InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ${self:service}-${self:provider.stage}-EC2InstanceRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns: # Using managed policies for common use cases
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore # For AWS Systems Manager Session Manager (recommended for SSH access)
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy # To allow metrics and logs to be sent to CloudWatch
+      Policies:
+        - PolicyName: ${self:service}-${self:provider.stage}-ECRReadAndSpecificActions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow # Required for EC2 instances to pull images from ECR
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:GetRepositoryPolicy
+                  - ecr:DescribeRepositories
+                  - ecr:ListImages
+                  - ecr:DescribeImages
+                  - ecr:BatchGetImage
+                  - ecr:GetLifecyclePolicy
+                  - ecr:GetLifecyclePolicyPreview
+                  - ecr:ListTagsForResource
+                  - ecr:DescribeImageScanFindings
+                Resource: "*" # You could restrict this to the specific ECR repository ARN if desired: !GetAtt N8nEcrRepository.Arn
+              # Add other specific permissions your application might need below
+              # Example: Allow reading a specific S3 bucket
+              # - Effect: Allow
+              #   Action:
+              #     - s3:GetObject
+              #   Resource: arn:aws:s3:::your-specific-bucket/*
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: ${self:service}-${self:provider.stage}-EC2InstanceProfile
+      Roles:
+        - !Ref EC2InstanceRole
+
+Outputs:
+  EC2InstanceProfileArn:
+    Description: ARN of the EC2 Instance Profile
+    Value: !GetAtt EC2InstanceProfile.Arn
+    Export:
+      Name: ${self:service}-${self:provider.stage}-EC2InstanceProfileArn
+  EC2InstanceRoleArn:
+    Description: ARN of the EC2 Instance Role
+    Value: !GetAtt EC2InstanceRole.Arn
+    Export:
+      Name: ${self:service}-${self:provider.stage}-EC2InstanceRoleArn

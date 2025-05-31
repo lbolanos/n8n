@@ -1,0 +1,178 @@
+Resources:
+  # VPC
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16 # Define your VPC CIDR block
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: ${self:service}-${self:provider.stage}-vpc
+
+  # Internet Gateway
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: ${self:service}-${self:provider.stage}-igw
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # Public Subnets (Example: 2 public subnets in different AZs)
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: ${self:provider.region}a # AZ 'a'
+      CidrBlock: 10.0.1.0/24 # Define CIDR for public subnet 1
+      MapPublicIpOnLaunch: true # Instances launched in this subnet get a public IP
+      Tags:
+        - Key: Name
+          Value: ${self:service}-${self:provider.stage}-public-subnet-1
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: ${self:provider.region}b # AZ 'b'
+      CidrBlock: 10.0.2.0/24 # Define CIDR for public subnet 2
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: ${self:service}-${self:provider.stage}-public-subnet-2
+
+  # Private Subnets (Example: 2 private subnets for RDS, etc.)
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: ${self:provider.region}a # AZ 'a'
+      CidrBlock: 10.0.101.0/24 # Define CIDR for private subnet 1
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: ${self:service}-${self:provider.stage}-private-subnet-1
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: ${self:provider.region}b # AZ 'b'
+      CidrBlock: 10.0.102.0/24 # Define CIDR for private subnet 2
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: ${self:service}-${self:provider.stage}-private-subnet-2
+
+  # Route Table for Public Subnets
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: ${self:service}-${self:provider.stage}-public-rt
+  PublicRoute: # Route to Internet Gateway
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+  AssociatePublicSubnet1RouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+  AssociatePublicSubnet2RouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  # NAT Gateway (for private subnets to access internet if needed)
+  # EIP for NAT Gateway
+  NatGatewayEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: ${self:service}-${self:provider.stage}-nat-eip
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayEIP.AllocationId
+      SubnetId: !Ref PublicSubnet1 # NAT Gateway should be in a public subnet
+      Tags:
+        - Key: Name
+          Value: ${self:service}-${self:provider.stage}-nat-gw
+
+  # Route Table for Private Subnets
+  PrivateRouteTable1: # One route table per AZ for private subnets if using zonal NAT Gateways
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: ${self:service}-${self:provider.stage}-private-rt-1
+  PrivateRoute1: # Route to NAT Gateway
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway # Route outbound traffic from private subnet 1 via NAT
+  AssociatePrivateSubnet1RouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable1
+
+  PrivateRouteTable2: # Separate route table for the other private subnet in a different AZ
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: ${self:service}-${self:provider.stage}-private-rt-2
+  PrivateRoute2: # Route to NAT Gateway
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway # Could also use a second NAT GW in PublicSubnet2 for HA
+  AssociatePrivateSubnet2RouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable2
+
+# Outputs (optional, but useful for referencing in other stacks or for information)
+Outputs:
+  VPCId:
+    Description: The ID of the VPC
+    Value: !Ref VPC
+    Export:
+      Name: ${self:service}-${self:provider.stage}-VPCId
+  PublicSubnet1Id:
+    Description: ID of Public Subnet 1
+    Value: !Ref PublicSubnet1
+    Export:
+      Name: ${self:service}-${self:provider.stage}-PublicSubnet1Id
+  PublicSubnet2Id:
+    Description: ID of Public Subnet 2
+    Value: !Ref PublicSubnet2
+    Export:
+      Name: ${self:service}-${self:provider.stage}-PublicSubnet2Id
+  PrivateSubnet1Id:
+    Description: ID of Private Subnet 1
+    Value: !Ref PrivateSubnet1
+    Export:
+      Name: ${self:service}-${self:provider.stage}-PrivateSubnet1Id
+  PrivateSubnet2Id:
+    Description: ID of Private Subnet 2
+    Value: !Ref PrivateSubnet2
+    Export:
+      Name: ${self:service}-${self:provider.stage}-PrivateSubnet2Id

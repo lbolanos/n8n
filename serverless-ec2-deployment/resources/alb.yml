@@ -1,0 +1,111 @@
+# resources/alb.yml
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID for the ALB. (e.g., !ImportValue ${self:service}-${self:provider.stage}-VPCId)
+  PublicSubnet1Id:
+    Type: AWS::EC2::Subnet::Id
+    Description: ID of the first public subnet for ALB. (e.g., !ImportValue ${self:service}-${self:provider.stage}-PublicSubnet1Id)
+  PublicSubnet2Id:
+    Type: AWS::EC2::Subnet::Id
+    Description: ID of the second public subnet for ALB. (e.g., !ImportValue ${self:service}-${self:provider.stage}-PublicSubnet2Id)
+  AlbSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Security Group ID for the ALB. (e.g., !ImportValue ${self:service}-${self:provider.stage}-ALBSecurityGroupId)
+  ApplicationPort:
+    Type: Number
+    Description: Port the application is running on (on EC2 instances).
+    Default: 5678
+  # Optional: Certificate ARN for HTTPS listener
+  # CertificateArn:
+  #   Type: String
+  #   Description: ARN of the SSL certificate for HTTPS. (e.g., from AWS Certificate Manager)
+  #   Default: "" # Set to an actual ARN to enable HTTPS
+
+Resources:
+  N8nApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: ${self:service}-${self:provider.stage}-alb
+      Scheme: internet-facing
+      Subnets:
+        - !Ref PublicSubnet1Id
+        - !Ref PublicSubnet2Id
+      SecurityGroups:
+        - !Ref AlbSecurityGroupId
+      Tags:
+        - Key: Name
+          Value: ${self:service}-${self:provider.stage}-alb
+
+  # Target Group for EC2 instances
+  N8nAppTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: ${self:service}-${self:provider.stage}-n8n-tg
+      VpcId: !Ref VpcId
+      Port: !Ref ApplicationPort
+      Protocol: HTTP # Protocol between ALB and your instances
+      TargetType: instance # Targets are EC2 instances
+      HealthCheck:
+        Enabled: true
+        Path: /healthz # n8n's default health check path. Adjust if your app is different.
+        Port: traffic-port # Use the port of the target group
+        Protocol: HTTP
+        Matcher:
+          HttpCode: '200'
+        IntervalSeconds: 30
+        TimeoutSeconds: 5
+        HealthyThresholdCount: 2
+        UnhealthyThresholdCount: 2
+      Tags:
+        - Key: Name
+          Value: ${self:service}-${self:provider.stage}-n8n-tg
+
+  # HTTP Listener (Port 80) - Forwards to Target Group
+  # For production, you might want to redirect HTTP to HTTPS
+  HttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref N8nApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref N8nAppTargetGroup
+        # Example: Redirect HTTP to HTTPS if CertificateArn is provided
+        # - Type: redirect
+        #   RedirectConfig:
+        #     Protocol: HTTPS
+        #     Port: '443'
+        #     StatusCode: HTTP_301
+        #   Order: 1
+        #   Condition: !Equals [!Ref CertificateArn, ""] # This condition logic might need adjustment or use Fn::If
+        # - Type: forward
+        #   TargetGroupArn: !Ref N8nAppTargetGroup
+        #   Order: 2
+
+  # Optional: HTTPS Listener (Port 443) - Requires a certificate
+  # HttpsListener:
+  #   Type: AWS::ElasticLoadBalancingV2::Listener
+  #   # Condition: SomeConditionToCreateHttps # Create only if CertificateArn is provided
+  #   Properties:
+  #     LoadBalancerArn: !Ref N8nApplicationLoadBalancer
+  #     Port: 443
+  #     Protocol: HTTPS
+  #     Certificates:
+  #       - CertificateArn: !Ref CertificateArn # Parameter for ACM certificate ARN
+  #     DefaultActions:
+  #       - Type: forward
+  #         TargetGroupArn: !Ref N8nAppTargetGroup
+
+Outputs:
+  LoadBalancerDNSName:
+    Description: The DNS name of the Application Load Balancer
+    Value: !GetAtt N8nApplicationLoadBalancer.DNSName
+    Export:
+      Name: ${self:service}-${self:provider.stage}-LoadBalancerDNSName
+  N8nAppTargetGroupArn:
+    Description: ARN of the N8N App Target Group
+    Value: !Ref N8nAppTargetGroup
+    Export:
+      Name: ${self:service}-${self:provider.stage}-N8nAppTargetGroupArn

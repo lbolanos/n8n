@@ -1,0 +1,44 @@
+# resources/ecr.yml
+Resources:
+  N8nEcrRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: ${self:service}-${self:provider.stage}-n8n # Example: my-ec2-service-dev-n8n
+      # ImageScanningConfiguration: # Optional: Enable image scanning for vulnerabilities
+      #   ScanOnPush: true
+      ImageTagMutability: IMMUTABLE # Recommended: Prevents image tags from being overwritten
+      Tags:
+        - Key: Name
+          Value: ${self:service}-${self:provider.stage}-n8n-repo
+        - Key: Stage
+          Value: ${self:provider.stage}
+      # LifecyclePolicy: # Optional: Define a lifecycle policy to manage old images
+      #   LifecyclePolicyText: |
+      #     {
+      #       "rules": [
+      #         {
+      #           "rulePriority": 1,
+      #           "description": "Keep only last 10 images",
+      #           "selection": {
+      #             "tagStatus": "any",
+      #             "countType": "imageCountMoreThan",
+      #             "countNumber": 10
+      #           },
+      #           "action": {
+      #             "type": "expire"
+      #           }
+      #         }
+      #       ]
+      #     }
+
+Outputs:
+  N8nEcrRepositoryUri:
+    Description: The URI of the N8N ECR repository
+    Value: !GetAtt N8nEcrRepository.RepositoryUri
+    Export:
+      Name: ${self:service}-${self:provider.stage}-N8nEcrRepositoryUri
+  N8nEcrRepositoryName:
+    Description: The Name of the N8N ECR repository
+    Value: !Ref N8nEcrRepository
+    Export:
+      Name: ${self:service}-${self:provider.stage}-N8nEcrRepositoryName

@@ -1,0 +1,80 @@
+# Optional: AWS RDS Database Instance
+# Uncomment the resources below and the reference in serverless.yml if you need an RDS database.
+# Ensure you have private subnets defined in vpc.yml for the DBSubnetGroup.
+
+# Parameters:
+#   DBUsername:
+#     Type: String
+#     Description: Username for the RDS database
+#     NoEcho: true # Mark as NoEcho for sensitive data
+#   DBPassword:
+#     Type: String
+#     Description: Password for the RDS database
+#     NoEcho: true # Mark as NoEcho for sensitive data
+
+Resources:
+  # Security Group for RDS Instance
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: ${self:service}-${self:provider.stage}-RDSSG
+      GroupDescription: Security group for RDS instance
+      VpcId: !Ref VPC # Assumes VPC is defined and referenced (e.g., from vpc.yml)
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306 # Example for MySQL. Change to 5432 for PostgreSQL, etc.
+          ToPort: 3306 # Example for MySQL
+          SourceSecurityGroupId: !GetAtt EC2SecurityGroup.Outputs.InstanceSecurityGroupId # Allow traffic from the EC2 instance's SG
+          # Alternatively, you can use `SourceSecurityGroupId: !Ref EC2SecurityGroup` if EC2SecurityGroup is defined in this file
+          # or if you pass its ID as a parameter.
+          # Using !GetAtt assumes EC2SecurityGroup is a nested stack outputting its ID.
+      Tags:
+        - Key: Name
+          Value: ${self:service}-${self:provider.stage}-RDSSG
+
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet group for RDS instance
+      DBSubnetGroupName: ${self:service}-${self:provider.stage}-dbsubnetgroup
+      SubnetIds: # List of private subnet IDs
+        - !Ref PrivateSubnet1 # Assumes PrivateSubnet1 is defined in vpc.yml
+        - !Ref PrivateSubnet2 # Assumes PrivateSubnet2 is defined in vpc.yml
+      Tags:
+        - Key: Name
+          Value: ${self:service}-${self:provider.stage}-dbsubnetgroup
+
+  MyRDSInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: ${self:service}-${self:provider.stage}-db
+      DBName: ${self:service}${self:provider.stage}db # Alphanumeric, no hyphens
+      Engine: mysql # Specify your DB engine (e.g., mysql, postgres, sqlserver, oracle)
+      EngineVersion: '8.0' # Specify engine version
+      DBInstanceClass: db.t3.micro # Choose an appropriate instance class
+      AllocatedStorage: '20' # In GB
+      # MasterUsername: ${param:DBUsername} # Use parameters for credentials
+      # MasterUserPassword: ${param:DBPassword}
+      MasterUsername: RootUser # Replace with a more secure username, ideally from secrets
+      MasterUserPassword: ChangeThisPassword123! # Replace with a secure password, ideally from secrets/parameters
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - !Ref RDSSecurityGroup
+      PubliclyAccessible: false # Recommended for security
+      StorageEncrypted: true # Enable encryption at rest
+      # BackupRetentionPeriod: 7 # Number of days to retain backups
+      # PreferredBackupWindow: 07:00-09:00 # UTC
+      # PreferredMaintenanceWindow: sun:04:00-sun:06:00 # UTC
+      MultiAZ: false # Set to true for production for high availability
+      Tags:
+        - Key: Name
+          Value: ${self:service}-${self:provider.stage}-rds
+    # DeletionPolicy: Snapshot # Or Retain. Default is Delete. Be careful in production.
+
+# Outputs:
+#   RDSEndpointAddress:
+#     Description: The endpoint address of the RDS instance
+#     Value: !GetAtt MyRDSInstance.Endpoint.Address
+#   RDSEndpointPort:
+#     Description: The endpoint port of the RDS instance
+#     Value: !GetAtt MyRDSInstance.Endpoint.Port

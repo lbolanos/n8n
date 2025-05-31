@@ -1,0 +1,105 @@
+# serverless.yml
+service: my-n8n-service # Consider a more descriptive name like n8n-via-alb-ec2
+
+frameworkVersion: '3'
+
+provider:
+  name: aws
+  runtime: nodejs18.x # Not directly used for EC2 deployment but required by Serverless Framework
+  stage: ${opt:stage, 'dev'}
+  region: ${opt:region, 'us-east-1'}
+
+# Custom variables for easy configuration
+custom:
+  defaultStage: dev
+  defaultRegion: us-east-1
+  appName: n8n # Used for consistent naming
+  imageTag: latest # Tag of the Docker image in ECR to deploy
+
+  # Secrets management (ensure secrets.[stage].yml is in .gitignore)
+  secrets: ${file(secrets.${self:provider.stage}.yml),ดูแล้งนี้} # Fallback if file not found
+
+  # Parameters to pass to nested stacks (resource files)
+  # These can be overridden via command line or environment variables if needed
+  vpcParams:
+    # CidrBlock: 10.0.0.0/16 # Example, if you need to customize VPC CIDR from here
+    # PublicSubnet1Cidr: 10.0.1.0/24
+    # ...
+  ec2LaunchTemplateParams:
+    InstanceType: t3.medium # Example: Override default instance type for LT
+    # LatestAmiId: ami-xxxxxxxxxxxxxxxxx # Override if not using default SSM AL2023
+    # KeyName: "your-ssh-key-name" # If you need direct SSH with a key
+  asgParams:
+    DesiredCapacity: 1
+    MinSize: 1
+    MaxSize: 2
+  ec2SecurityGroupParams:
+    YourIPForSSH: "0.0.0.0/0" # WARNING: Change this in production!
+    ApplicationPort: 5678 # n8n default port
+  # albParams:
+    # CertificateArn: "arn:aws:acm:..." # Provide ACM Cert ARN for HTTPS
+
+# Resources are defined in separate files and deployed as nested CloudFormation stacks
+resources:
+  # Order matters for dependencies if not using explicit DependsOn or !ImportValue for all cross-refs
+  # However, Serverless Framework generally handles dependencies based on !Ref and !GetAtt between these "file" resources.
+
+  # 1. VPC (Foundation)
+  - file: resources/vpc.yml
+    # parameters: ${self:custom.vpcParams} # Pass VPC specific params if any
+
+  # 2. ECR Repository (To store Docker images)
+  - file: resources/ecr.yml
+
+  # 3. IAM Roles (For EC2 instances)
+  - file: resources/iam_roles.yml
+
+  # 4. EC2 Security Groups (For ALB and Instances)
+  #    Depends on VPC created by vpc.yml
+  - file: resources/ec2_security_groups.yml
+    parameters:
+      VpcId: !GetAtt VPC.Outputs.VPCId # Reference output from vpc.yml (assuming VPC is the logical ID of the VPC resource in vpc.yml)
+      YourIPForSSH: ${self:custom.ec2SecurityGroupParams.YourIPForSSH}
+      ApplicationPort: ${self:custom.ec2SecurityGroupParams.ApplicationPort}
+
+  # 5. EC2 Launch Template (Defines how instances are launched)
+  #    Depends on IAM Roles and EC2 Security Groups
+  - file: resources/ec2_launch_template.yml
+    parameters:
+      LatestAmiId: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64 # Defaulting here, can be in custom
+      InstanceType: ${self:custom.ec2LaunchTemplateParams.InstanceType}
+      # KeyName: ${self:custom.ec2LaunchTemplateParams.KeyName} # Pass if set
+      # Note: IamInstanceProfileArn and InstanceSecurityGroupId are imported within ec2_launch_template.yml directly using !ImportValue
+
+  # 6. Application Load Balancer (ALB)
+  #    Depends on VPC and ALB Security Group
+  - file: resources/alb.yml
+    parameters:
+      VpcId: !GetAtt VPC.Outputs.VPCId
+      PublicSubnet1Id: !GetAtt VPC.Outputs.PublicSubnet1Id
+      PublicSubnet2Id: !GetAtt VPC.Outputs.PublicSubnet2Id
+      AlbSecurityGroupId: !GetAtt ALBSecurityGroup.Outputs.ALBSecurityGroupId # From ec2_security_groups.yml
+      ApplicationPort: ${self:custom.ec2SecurityGroupParams.ApplicationPort}
+      # CertificateArn: ${self:custom.albParams.CertificateArn} # Pass if set
+
+  # 7. Auto Scaling Group (ASG)
+  #    Depends on Launch Template, ALB Target Group, and VPC Subnets
+  - file: resources/asg.yml
+    parameters:
+      LaunchTemplateId: !GetAtt N8nLaunchTemplate.Outputs.N8nLaunchTemplateId # From ec2_launch_template.yml
+      LaunchTemplateVersion: !GetAtt N8nLaunchTemplate.Outputs.N8nLaunchTemplateVersion # From ec2_launch_template.yml
+      N8nAppTargetGroupArn: !GetAtt N8nApplicationLoadBalancer.Outputs.N8nAppTargetGroupArn # From alb.yml (assuming N8nApplicationLoadBalancer is the logical ID of the ALB in alb.yml)
+      PrivateSubnet1Id: !GetAtt VPC.Outputs.PrivateSubnet1Id
+      PrivateSubnet2Id: !GetAtt VPC.Outputs.PrivateSubnet2Id
+      DesiredCapacity: ${self:custom.asgParams.DesiredCapacity}
+      MinSize: ${self:custom.asgParams.MinSize}
+      MaxSize: ${self:custom.asgParams.MaxSize}
+
+# Outputs from the main stack (optional, but can be useful)
+# These would typically be outputs from the individual resource files,
+# but you can re-export them here if needed.
+# Example: ALB DNS Name
+# outputs:
+#   N8nAlbDnsName:
+#     Description: "DNS Name for the N8N Application Load Balancer"
+#     Value: !GetAtt N8nApplicationLoadBalancer.Outputs.LoadBalancerDNSName # Accessing output from alb.yml

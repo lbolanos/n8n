@@ -1,0 +1,70 @@
+# resources/ec2_security_groups.yml
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID for the security groups. Use !ImportValue for the VPC created in vpc.yml.
+    # Example if vpc.yml is in the same stack and exports VPCId:
+    # Default: !Ref VPC # If VPC is defined in the same serverless.yml scope as a resource
+    # If vpc.yml is deployed separately or to ensure it's available:
+    # Default: !ImportValue ${self:service}-${self:provider.stage}-VPCId
+  YourIPForSSH:
+    Type: String
+    Description: Your IP address range for SSH access to EC2 instances (e.g., x.x.x.x/32).
+    Default: 0.0.0.0/0 # WARNING: Open to all IPs by default. Change this for production!
+  ApplicationPort:
+    Type: Number
+    Description: Port your application (n8n container) listens on.
+    Default: 5678
+
+Resources:
+  # Security Group for Application Load Balancer
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: ${self:service}-${self:provider.stage}-ALBSG
+      GroupDescription: Security group for the Application Load Balancer
+      VpcId: !Ref VpcId # Parameterize VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80 # HTTP
+          ToPort: 80
+          CidrIp: 0.0.0.0/0 # Allow HTTP from anywhere
+        - IpProtocol: tcp
+          FromPort: 443 # HTTPS
+          ToPort: 443
+          CidrIp: 0.0.0.0/0 # Allow HTTPS from anywhere (assuming you'll have a certificate on the ALB)
+      Tags:
+        - Key: Name
+          Value: ${self:service}-${self:provider.stage}-ALBSG
+
+  # Security Group for EC2 Instances (used by Launch Template)
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: ${self:service}-${self:provider.stage}-InstanceSG
+      GroupDescription: Security group for the EC2 instances running the application
+      VpcId: !Ref VpcId # Parameterize VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22 # SSH
+          ToPort: 22
+          CidrIp: !Ref YourIPForSSH
+        - IpProtocol: tcp
+          FromPort: !Ref ApplicationPort # Application port (e.g., 5678 for n8n)
+          ToPort: !Ref ApplicationPort
+          SourceSecurityGroupId: !Ref ALBSecurityGroup # Allow traffic only from the ALB on the application port
+      Tags:
+        - Key: Name
+          Value: ${self:service}-${self:provider.stage}-InstanceSG
+
+Outputs:
+  ALBSecurityGroupId:
+    Description: The ID of the ALB Security Group
+    Value: !Ref ALBSecurityGroup
+    Export:
+      Name: ${self:service}-${self:provider.stage}-ALBSecurityGroupId
+  InstanceSecurityGroupId:
+    Description: The ID of the Instance Security Group
+    Value: !Ref InstanceSecurityGroup
+    Export:
+      Name: ${self:service}-${self:provider.stage}-InstanceSecurityGroupId
