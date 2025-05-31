@@ -1,0 +1,108 @@
+# resources/rds.yml
+Conditions:
+  IsProd: !Not [ !Equals ["${opt:stage, self:provider.stage}", "dev"]]
+
+
+Resources:
+  N8NDBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: N8N DB Subnet Group
+      SubnetIds:
+      - !Ref N8NPrivateSubnet1
+      - !Ref N8NPrivateSubnet2
+      Tags:
+        - Key: Name
+          Value: N8N-DBSubnetGroup-${self:custom.stage}
+
+  # Aurora PostgreSQL DB Cluster Secret
+  N8NAuroraDBSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: ${self:provider.stackName}-AuroraClusterSecret
+      Description: Credentials for n8n Aurora PostgreSQL
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "admin"}'
+        GenerateStringKey: "password"
+        PasswordLength: 32
+        ExcludeCharacters: '"@/\\'
+
+  # Aurora PostgreSQL DB Cluster
+  N8NAuroraDBCluster:
+    Type: AWS::RDS::DBCluster
+    Properties:
+      DeletionProtection: !If [IsProd, true, false]
+      Engine: aurora-postgresql
+      EngineVersion: "15.3" # Check AWS for latest supported version
+      DBClusterIdentifier: n8n-aurora-cluster-${self:custom.stage}
+      DatabaseName: n8ndb
+      MasterUsername: !Join [ '', [ '{{resolve:secretsmanager:', !Ref N8NAuroraDBSecret, ':SecretString:username}}' ] ]
+      MasterUserPassword: !Join [ '', [ '{{resolve:secretsmanager:', !Ref N8NAuroraDBSecret, ':SecretString:password}}' ] ]
+      DBSubnetGroupName: !Ref N8NDBSubnetGroup
+      VpcSecurityGroupIds:
+        - !Ref N8NEC2SecurityGroup
+      BackupRetentionPeriod: 7
+      StorageEncrypted: true
+      #EnableHttpEndpoint: true
+      Tags:
+        - Key: Name
+          Value: N8N-Aurora-Cluster-${self:custom.stage}
+
+  # Aurora Cluster Instance (Writer)
+  N8NAuroraDBInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBClusterIdentifier: !Ref N8NAuroraDBCluster
+      DBInstanceClass: db.t4g.medium #db.r6g.large # Choose appropriate instance class
+      Engine: aurora-postgresql
+      PubliclyAccessible: false
+      Tags:
+        - Key: Name
+          Value: N8N-Aurora-Instance-${self:custom.stage}
+
+  # Attach secret to Aurora cluster
+  N8NAuroraSecretTargetAttachment:
+    Type: AWS::SecretsManager::SecretTargetAttachment
+    Properties:
+      SecretId: !Ref N8NAuroraDBSecret
+      TargetId: !Ref N8NAuroraDBCluster
+      TargetType: AWS::RDS::DBCluster
+
+  # Legacy: Standalone RDS PostgreSQL instance (for reference)
+  #N8NDatabase:
+  #  Type: AWS::RDS::DBInstance
+  #  Properties:
+  #    DBName: n8ndb
+  #    Engine: postgres
+  #    EngineVersion: "15" # Check for latest supported versions
+  #    MasterUsername: !If [IsProd, !Join [ '', [ '{{resolve:secretsmanager:', !Ref N8NAuroraDBSecret, ':SecretString:username}}' ] ], admin]
+  #    MasterUserPassword: !If [IsProd, !Join [ '', [ '{{resolve:secretsmanager:', !Ref N8NAuroraDBSecret, ':SecretString:password}}' ] ], password]
+
+  #    DBInstanceClass: db.t3.micro # Choose an appropriate instance class (t3.micro is for testing)
+  #    AllocatedStorage: "20" # In GB
+  #    PubliclyAccessible: false # Important for security
+  #    DBSubnetGroupName: !Ref N8NDBSubnetGroup
+  #    VPCSecurityGroups:
+  #      - !Ref N8NRDSSecurityGroup
+  #    MultiAZ: !If [IsProd, true, false] # Set to true for production for high availability
+  #    StorageEncrypted: true # Recommended for security
+  #    BackupRetentionPeriod: 7 # Days, adjust as needed
+  #    DeleteAutomatedBackups: !If [IsProd, true, false] # For production, keep backups
+  #    DeletionProtection: !If [IsProd, true, false] # Set to true for production
+  #    Tags:
+  #      - Key: Name
+  #        Value: N8N-Database-${self:custom.stage}
+    # For production, consider not setting DeletionProtection to false and manage updates carefully.
+    # UpdateReplacePolicy: Retain # Or Snapshot, depending on your strategy for DB updates
+    # DeletionPolicy: Retain # Or Snapshot
+
+Outputs:
+  AuroraSecretNAME:
+    Description: Aurora Secret NAME
+    Value: ${self:provider.stackName}-AuroraClusterSecret
+
+  AuroraSecretARN:
+    Description: Aurora Secret ARN
+    Value: !Ref N8NAuroraDBSecret
+
+

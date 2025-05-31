@@ -1,0 +1,97 @@
+# resources/security_groups.yml
+Resources:
+  N8NALBSecurityGroup: # If using ALB
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: N8NALBSecurityGroup-${self:custom.stage}
+      GroupDescription: Allow HTTP/HTTPS traffic to ALB
+      VpcId:
+        Ref: N8NVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0 # Restrict to your IP if possible for testing
+      Tags:
+        - Key: Name
+          Value: N8N-ALB-SG-${self:custom.stage}
+
+  N8NEC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: N8NEC2SecurityGroup-${self:custom.stage}
+      GroupDescription: Allow traffic to N8N EC2 instance
+      VpcId:
+        Ref: N8NVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp # n8n port
+          FromPort: 5678
+          ToPort: 5678
+          SourceSecurityGroupId: !Ref N8NALBSecurityGroup # Only from ALB if using one
+          # If not using ALB, open to 0.0.0.0/0 (or your IP) if EC2 has public IP:
+          # CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp # SSH access (restrict to your IP)
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !If [IsProd, 189.203.45.48/32, 0.0.0.0/0] # Prod: only your IP, else open for testing
+      Tags:
+        - Key: Name
+          Value: N8N-EC2-SG-${self:custom.stage}
+
+  N8NRDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: N8NRDSSecurityGroup-${self:custom.stage}
+      GroupDescription: Allow PostgreSQL traffic from EC2
+      VpcId:
+        Ref: N8NVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432 # PostgreSQL port
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref N8NEC2SecurityGroup # Only from your EC2 instance
+      Tags:
+        - Key: Name
+          Value: N8N-RDS-SG-${self:custom.stage}
+
+  N8NEFSSecurityGroup: # For EFS Mount Targets
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: N8NEFSSecurityGroup-${self:custom.stage}
+      GroupDescription: Allow NFS traffic from EC2 for EFS
+      VpcId:
+        Ref: N8NVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 2049 # NFS port
+          ToPort: 2049
+          SourceSecurityGroupId: !Ref N8NEC2SecurityGroup # Only from your EC2 instance
+      Tags:
+        - Key: Name
+          Value: N8N-EFS-SG-${self:custom.stage}
+
+Outputs:
+  ALBSecurityGroupId:
+    Description: Security Group ID for the ALB
+    Value: !Ref N8NALBSecurityGroup
+    Export:
+      Name: ${self:custom.stage}-ALBSecurityGroupId
+  EC2SecurityGroupId:
+    Description: Security Group ID for the EC2 Instance
+    Value: !Ref N8NEC2SecurityGroup
+    Export:
+      Name: ${self:custom.stage}-EC2SecurityGroupId
+  RDSSecurityGroupId:
+    Description: Security Group ID for the RDS Instance
+    Value: !Ref N8NRDSSecurityGroup
+    Export:
+      Name: ${self:custom.stage}-RDSSecurityGroupId
+  EFSSecurityGroupId:
+    Description: Security Group ID for the EFS Mount Targets
+    Value: !Ref N8NEFSSecurityGroup
+    Export:
+      Name: ${self:custom.stage}-EFSSecurityGroupId

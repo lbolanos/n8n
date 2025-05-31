@@ -1,0 +1,72 @@
+# resources/efs.yml
+Resources:
+  N8NEFSFileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      Encrypted: true # Recommended
+      PerformanceMode: generalPurpose
+      ThroughputMode: bursting # Or provisioned if you have high throughput needs
+      LifecyclePolicies:
+        - TransitionToIA: AFTER_30_DAYS # Example lifecycle policy
+      FileSystemPolicy: # Optional: Restrict access at the file system level
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: "*" # Allows mounting by any IAM principal within the VPC that can reach it
+            Action:
+              - elasticfilesystem:ClientMount
+              - elasticfilesystem:ClientWrite
+            # Condition: # Add conditions if needed, e.g., to restrict to specific IAM roles
+            # StringEquals:
+            #   "elasticfilesystem:AccessPointArn": !Ref N8NEFSAccessPoint
+      FileSystemTags:
+        - Key: Name
+          Value: N8N-EFS-${self:custom.stage}
+
+  # EFS Mount Target in each private subnet for resilience and access
+  N8NEFSMountTargetPrivate1:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref N8NEFSFileSystem
+      SubnetId: !Ref N8NPrivateSubnet1
+      SecurityGroups:
+        - !Ref N8NEFSSecurityGroup
+
+  N8NEFSMountTargetPrivate2:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref N8NEFSFileSystem
+      SubnetId: !Ref N8NPrivateSubnet2
+      SecurityGroups:
+        - !Ref N8NEFSSecurityGroup
+
+  # Optional: EFS Access Point for fine-grained access control (recommended)
+  N8NEFSAccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref N8NEFSFileSystem
+      PosixUser: # Configures the user/group EFS presents files as
+        Uid: "1000" # n8n container user 'node' UID
+        Gid: "1000" # n8n container user 'node' GID
+      RootDirectory:
+        Path: "/n8n_data" # Creates this directory if it doesn't exist
+        CreationInfo:
+          OwnerUid: "1000"
+          OwnerGid: "1000"
+          Permissions: "0755" # Or 0775 if group write needed
+      AccessPointTags:
+      - Key: Name
+        Value: N8N-EFS-AccessPoint-${self:custom.stage}
+
+Outputs:
+  EFSFileSystemId:
+    Description: ID of the EFS File System
+    Value: !Ref N8NEFSFileSystem
+    Export:
+      Name: ${self:custom.stage}-EFSFileSystemId
+  EFSAccessPointId: # If using Access Point
+    Description: ID of the EFS Access Point
+    Value: !Ref N8NEFSAccessPoint
+    Export:
+      Name: ${self:custom.stage}-EFSAccessPointId

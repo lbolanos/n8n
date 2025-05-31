@@ -1,0 +1,50 @@
+# resources/asg.yml
+
+Conditions:
+  IsProd: !Not [ !Equals ["${opt:stage, self:provider.stage}", "dev"] ]
+
+Resources:
+  N8nApplicationAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: ${self:service}-${self:custom.stage}-n8n-asg
+      LaunchTemplate:
+        LaunchTemplateId: !Ref N8nLaunchTemplate
+        Version: !GetAtt N8nLaunchTemplate.LatestVersionNumber
+      MinSize: ${self:custom.asgParams.MinSize}
+      MaxSize: ${self:custom.asgParams.MaxSize}
+      DesiredCapacity: ${self:custom.asgParams.DesiredCapacity}
+      VPCZoneIdentifier: !If
+        - IsProd
+        -
+          - !ImportValue ${self:custom.stage}-PrivateSubnet1Id
+          - !ImportValue ${self:custom.stage}-PrivateSubnet2Id
+        -
+          - !ImportValue ${self:custom.stage}-PublicSubnet1Id
+          - !ImportValue ${self:custom.stage}-PublicSubnet2Id
+      TargetGroupARNs: # Attach to ALB Target Group
+        - !ImportValue ${self:custom.stage}-N8NTargetGroupArn
+      HealthCheckType: ELB # Use ELB health checks for ASG
+      HealthCheckGracePeriod: 300 # Seconds. Time to allow instance to start before ELB health checks start.
+      Tags:
+        - Key: Name
+          Value: ${self:service}-${self:custom.stage}-n8n-asg-instance
+          PropagateAtLaunch: true # Propagate this tag to instances launched by ASG
+        - Key: Stage
+          Value: ${self:custom.stage}
+          PropagateAtLaunch: true
+    # UpdatePolicy: # Optional: Define an update policy for rolling updates
+    #   AutoScalingScheduledAction:
+    #     IgnoreUnmodifiedGroupSizeProperties: true
+    #   AutoScalingRollingUpdate:
+    #     MinInstancesInService: !Ref MinSize # Or a specific number
+    #     MaxBatchSize: '1'
+    #     PauseTime: PT5M # Example: 5 minutes
+    #     WaitOnResourceSignals: true # If using cfn-signal for more complex deployments
+
+# Outputs:
+#   N8nApplicationAutoScalingGroupName:
+#     Description: Name of the N8N Application Auto Scaling Group
+#     Value: !Ref N8nApplicationAutoScalingGroup
+#     Export:
+#       Name: ${self:service}-${self:provider.stage}-N8nASGName

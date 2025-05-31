@@ -25,3 +25,9 @@ build-storybook.log
 *.junit.xml
 junit.xml
 test-results.json
+n8n-ec2-deployment/n8n-ec2-instance/.serverless/cloudformation-template-update-stack.json
+n8n-ec2-deployment/n8n-ec2-instance/.serverless/meta.json
+n8n-ec2-deployment/n8n-ec2-instance/.serverless/serverless-state.json
+n8n-ec2-deployment/n8n-ec2-networking/.serverless/cloudformation-template-update-stack.json
+n8n-ec2-deployment/n8n-ec2-networking/.serverless/meta.json
+n8n-ec2-deployment/n8n-ec2-networking/.serverless/serverless-state.json

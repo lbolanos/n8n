@@ -1,0 +1,25 @@
+# "org" ensures this Service is used with the correct Serverless Framework Access Key.
+org: defytek
+# "app" enables Serverless Framework Dashboard features and sharing them with other Services.
+app: n8n
+# n8n-networking/serverless.yml
+service: n8n-networking
+provider:
+  name: aws
+  runtime: nodejs18.x # Not used, but required by Serverless
+  region: ${opt:region,  'us-east-1'}
+  stackName: ${opt:stage,self:provider.stage}-${self:service}
+  deploymentBucket:
+    name: ${file(../resources/serverless.common.yml):custom.SLS_DEPLOYMENT_BUCKET}
+
+custom:
+  stage: ${opt:stage, self:provider.stage, 'dev'}
+
+resources:
+  - ${file(../resources/vpc.yml)}
+  - ${file(../resources/security_groups.yml)}
+  - ${file(../resources/efs.yml)}
+  - ${file(../resources/rds.yml)}
+  - ${file(../resources/iam.yml)}
+  - ${file(../resources/alb.yml)}
+  #- ${file(../resources/secrets.yml)}

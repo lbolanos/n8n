@@ -1,0 +1,82 @@
+# resources/alb.yml
+Resources:
+  N8NApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: N8N-ALB-${self:custom.stage}
+      Scheme: internet-facing
+      Subnets:
+        - !Ref N8NPublicSubnet1
+        - !Ref N8NPublicSubnet2
+      SecurityGroups:
+        - !Ref N8NALBSecurityGroup
+      Type: application
+      IpAddressType: ipv4
+      Tags:
+        - Key: Name
+          Value: N8N-ALB-${self:custom.stage}
+
+  N8NTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: N8N-TG-${self:custom.stage}
+      Port: 5678 # Port n8n runs on inside EC2
+      Protocol: HTTP
+      VpcId:
+        Ref: N8NVPC
+      TargetType: instance # Or 'ip' if targeting Fargate/ECS directly
+      HealthCheckEnabled: true
+      HealthCheckPath: /healthz # n8n has a health check endpoint
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: "5678"
+      Matcher:
+        HttpCode: "200"
+      #Targets:
+      #  - Id: !Ref N8NEC2Instance # Target the EC2 instance
+      #    Port: 5678
+      Tags:
+        - Key: Name
+          Value: N8N-TG-${self:custom.stage}
+
+  N8NHTTPListener: # Redirects HTTP to HTTPS
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref N8NApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: "443"
+            StatusCode: HTTP_301
+
+  N8NHTTPSListener: # Handles HTTPS traffic
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref N8NApplicationLoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06 # Choose a modern SSL policy
+      Certificates:
+        - CertificateArn: arn:aws:acm:us-east-1:110414428664:certificate/17bfb10b-dffe-4d3b-8b06-d99e8fc7ee8f # ARN of your SSL certificate in AWS Certificate Manager
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref N8NTargetGroup
+
+Outputs:
+  ALBDNSName:
+    Description: DNS Name of the Application Load Balancer
+    Value: !GetAtt N8NApplicationLoadBalancer.DNSName
+    Export:
+      Name: ${self:custom.stage}-ALBDNSName
+  ALBHostedZoneId:
+    Description: Hosted Zone ID of the Application LoadBalancer
+    Value: !GetAtt N8NApplicationLoadBalancer.CanonicalHostedZoneID
+    Export:
+      Name: ${self:custom.stage}-ALBHostedZoneId
+  N8NTargetGroupArn:
+    Description: ARN of the N8N Target Group
+    Value: !Ref N8NTargetGroup
+    Export:
+      Name: ${self:custom.stage}-N8NTargetGroupArn

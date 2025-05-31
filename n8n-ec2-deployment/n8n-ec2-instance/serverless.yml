@@ -1,0 +1,30 @@
+# n8n-ec2-instance/serverless.yml
+service: n8n-ec2-instance
+provider:
+  name: aws
+  runtime: nodejs18.x # Not used, but required by Serverless
+  region: ${opt:region,  'us-east-1'}
+  stackName: ${opt:stage,self:provider.stage}-${self:service}
+  database: ${file(../resources/serverless.common.yml):DATABASE}
+  deploymentBucket:
+    name: ${file(../resources/serverless.common.yml):custom.SLS_DEPLOYMENT_BUCKET}
+  environment:
+    ${file(../resources/serverless.common.yml):environment}
+
+
+custom:
+  stage: ${opt:stage, self:provider.stage}
+  n8nVersion: latest # or a specific version like '1.20.0'
+  dbType: postgres
+  asgParams:
+    DesiredCapacity: 1
+    MinSize: 1
+    MaxSize: 2
+  ec2LaunchTemplateParams:
+    InstanceType: t3.medium
+    ImageId: "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2}}"
+
+resources:
+  # - ${file(../resources/ec2.yml)}
+  - ${file(../resources/ec2_launch_template.yml)}
+  - ${file(../resources/asg.yml)}

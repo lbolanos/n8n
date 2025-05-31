@@ -1,0 +1,102 @@
+# resources/iam.yml
+Resources:
+  N8NEC2InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: N8NEC2InstanceRole-${self:custom.stage}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore # For Systems Manager access
+        # Add other managed policies if needed
+      Policies:
+        # - PolicyName: N8NEC2SecretsManagerPolicy
+        #   PolicyDocument:
+        #     Version: '2012-10-17'
+        #     Statement:
+        #       - Effect: Allow
+        #         Action:
+        #           - secretsmanager:GetSecretValue
+        #         Resource: '*' # Allow all secrets for now, restrict later if needed
+        - PolicyName: N8NEC2UserDataExecutionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                Resource:
+                  - !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/n8n-ecr-repo # Replace with your actual ECR repo name
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - arn:aws:s3:::n8n-artifacts-bucket # Replace with your actual S3 bucket name
+                  - arn:aws:s3:::n8n-artifacts-bucket/*
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/ec2/n8n/*
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${self:provider.stackName}-AuroraClusterSecret-*
+              - Effect: Allow
+                Action:
+                  - autoscaling:DescribeAutoScalingGroups
+                Resource: '*'
+
+        - PolicyName: N8NEC2EFSPolicy # If needed for more complex EFS interactions beyond basic mount
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - elasticfilesystem:ClientMount # Basic mount permissions
+                  - elasticfilesystem:ClientWrite
+                  # Add more specific EFS actions if your setup requires them
+                Resource: "*" # Be more specific if possible, e.g., !GetAtt N8NEFSFileSystem.Arn
+
+  N8NEC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: N8NEC2InstanceProfile-${self:custom.stage}
+      Roles:
+        - !Ref N8NEC2InstanceRole
+
+Outputs:
+  N8NEC2InstanceRoleArn:
+    Description: ARN of the IAM Role for the EC2 Instance
+    Value: !GetAtt N8NEC2InstanceRole.Arn
+    Export:
+      Name: ${self:custom.stage}-N8NEC2InstanceRoleArn
+  N8NEC2InstanceProfileArn:
+    Description: ARN of the IAM Instance Profile for the EC2 Instance
+    Value: !GetAtt N8NEC2InstanceProfile.Arn
+    Export:
+      Name: ${self:custom.stage}-N8NEC2InstanceProfileArn
+  N8NEC2InstanceProfileName:
+    Description: Name of the IAM Instance Profile for the EC2 Instance
+    Value: !Ref N8NEC2InstanceProfile
+    Export:
+      Name: ${self:custom.stage}-N8NEC2InstanceProfileName

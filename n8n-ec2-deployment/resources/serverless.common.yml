@@ -1,0 +1,27 @@
+
+environment:
+  DB_TYPE: ${self:custom.dbType}
+  DB_CLUSTER_ARN: ${cf:${opt:stage, self:provider.stage}-n8n-networking.AuroraSecretARN}
+  DB_SECRET_ARN: ${cf:${opt:stage, self:provider.stage}-n8n-networking.AuroraSecretNAME}
+
+  REGION: ${opt:region,  self:provider.region, "us-east-1"}
+  STAGE: ${opt:stage, self:provider.stage}
+  #parameter store
+  AUTH_KEY: "/auth/AUTH_KEY"
+
+  #tables
+  POSTGRES_DB_HOST: ${self:provider.database.secrets.auroraDBSecret.host}
+  POSTGRES_DB_NAME: ${self:provider.database.secrets.auroraDBSecret.dbname}
+  POSTGRES_USER: ${self:provider.database.secrets.auroraDBSecret.username}
+  POSTGRES_PASSWORD: ${self:provider.database.secrets.auroraDBSecret.password}
+
+  #EFS
+  EFS_FILE_SYSTEM_ID: ${cf:${opt:stage, self:provider.stage}-n8n-networking.EFSFileSystemId}
+  EFS_ACCESS_POINT_ID: ${cf:${opt:stage, self:provider.stage}-n8n-networking.EFSAccessPointId}
+
+DATABASE:
+  secrets:
+    auroraDBSecret: ${ssm:/aws/reference/secretsmanager/${opt:stage, self:provider.stage}-n8n-networking-AuroraClusterSecret}
+
+custom:
+  SLS_DEPLOYMENT_BUCKET: cariai-serverless-${opt:stage, self:provider.stage}${opt:region,""}
