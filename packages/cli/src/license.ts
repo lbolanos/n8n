@@ -256,7 +256,7 @@ export class License implements LicenseProvider {
 
 	/** @deprecated Use `LicenseState.isAdvancedExecutionFiltersLicensed` instead. */
 	isAdvancedExecutionFiltersEnabled() {
-		return this.isLicensed(LICENSE_FEATURES.ADVANCED_EXECUTION_FILTERS);
+		return true;
 	}
 
 	/** @deprecated Use `LicenseState.isAdvancedPermissionsLicensed` instead. */
@@ -266,7 +266,7 @@ export class License implements LicenseProvider {
 
 	/** @deprecated Use `LicenseState.isDebugInEditorLicensed` instead. */
 	isDebugInEditorLicensed() {
-		return this.isLicensed(LICENSE_FEATURES.DEBUG_IN_EDITOR);
+		return true;
 	}
 
 	/** @deprecated Use `LicenseState.isBinaryDataS3Licensed` instead. */
@@ -296,7 +296,7 @@ export class License implements LicenseProvider {
 
 	/** @deprecated Use `LicenseState.isWorkflowHistoryLicensed` instead. */
 	isWorkflowHistoryLicensed() {
-		return this.isLicensed(LICENSE_FEATURES.WORKFLOW_HISTORY);
+		return true;
 	}
 
 	/** @deprecated Use `LicenseState.isAPIDisabled` instead. */
@@ -331,7 +331,7 @@ export class License implements LicenseProvider {
 
 	/** @deprecated Use `LicenseState.isFoldersLicensed` instead. */
 	isFoldersEnabled() {
-		return this.isLicensed(LICENSE_FEATURES.FOLDERS);
+		return true;
 	}
 
 	getCurrentEntitlements() {
