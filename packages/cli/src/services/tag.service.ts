@@ -16,7 +16,7 @@ export class TagService {
 		private tagRepository: TagRepository,
 	) {}
 
-	toEntity(attrs: { name: string; id?: string }) {
+	toEntity(attrs: { name: string; projectId: string; id?: string }) {
 		attrs.name = attrs.name.trim();
 
 		return this.tagRepository.create(attrs);
@@ -36,7 +36,14 @@ export class TagService {
 		return await savedTag;
 	}
 
-	async delete(id: string) {
+	async delete(id: string, projectId: string) {
+		// First, verify the tag belongs to the specified project
+		const tag = await this.tagRepository.findOneBy({ id, projectId });
+		if (!tag) {
+			// Or throw a more specific "NotFoundInProjectError"
+			throw new Error(`Tag with id "${id}" not found in project "${projectId}"`);
+		}
+
 		await this.externalHooks.run('tag.beforeDelete', [id]);
 
 		const deleteResult = this.tagRepository.delete(id);
@@ -46,11 +53,15 @@ export class TagService {
 		return await deleteResult;
 	}
 
-	async getAll<T extends { withUsageCount: boolean }>(options?: T): Promise<GetAllResult<T>> {
+	async getAll<T extends { withUsageCount: boolean }>(
+		projectId: string,
+		options?: T,
+	): Promise<GetAllResult<T>> {
 		if (options?.withUsageCount) {
 			const tags = await this.tagRepository
 				.createQueryBuilder('tag')
-				.select(['tag.id', 'tag.name', 'tag.createdAt', 'tag.updatedAt'])
+				.select(['tag.id', 'tag.name', 'tag.createdAt', 'tag.updatedAt', 'tag.projectId'])
+				.where('tag.projectId = :projectId', { projectId })
 				.loadRelationCountAndMap('tag.usageCount', 'tag.workflowMappings', 'wm', (qb) =>
 					qb.leftJoin('wm.workflows', 'workflow').where('workflow.isArchived = :isArchived', {
 						isArchived: false,
@@ -62,13 +73,14 @@ export class TagService {
 		}
 
 		return await (this.tagRepository.find({
-			select: ['id', 'name', 'createdAt', 'updatedAt'],
+			select: ['id', 'name', 'createdAt', 'updatedAt', 'projectId'],
+			where: { projectId },
 		}) as Promise<GetAllResult<T>>);
 	}
 
-	async getById(id: string) {
+	async getById(id: string, projectId: string) {
 		return await this.tagRepository.findOneOrFail({
-			where: { id },
+			where: { id, projectId },
 		});
 	}
 

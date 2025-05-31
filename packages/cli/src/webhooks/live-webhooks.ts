@@ -35,12 +35,12 @@ export class LiveWebhooks implements IWebhookManager {
 		private readonly workflowStaticDataService: WorkflowStaticDataService,
 	) {}
 
-	async getWebhookMethods(path: string) {
-		return await this.webhookService.getWebhookMethods(path);
+	async getWebhookMethods(path: string, projectId: string) { // Added projectId
+		return await this.webhookService.getWebhookMethods(path, projectId); // Pass projectId
 	}
 
-	async findAccessControlOptions(path: string, httpMethod: IHttpRequestMethods) {
-		const webhook = await this.findWebhook(path, httpMethod);
+	async findAccessControlOptions(path: string, httpMethod: IHttpRequestMethods, projectId: string) { // Added projectId
+		const webhook = await this.findWebhook(path, httpMethod, projectId); // Pass projectId
 
 		const workflowData = await this.workflowRepository.findOne({
 			where: { id: webhook.workflowId },
@@ -72,13 +72,21 @@ export class LiveWebhooks implements IWebhookManager {
 	): Promise<IWebhookResponseCallbackData> {
 		const httpMethod = request.method;
 		const path = request.params.path;
+		// Assume projectId is available on the request object, set by a prior middleware
+		const projectId = (request as any).projectId as string | undefined;
 
-		this.logger.debug(`Received webhook "${httpMethod}" for path "${path}"`);
+		if (!projectId) {
+			this.logger.error(`ProjectId not found on request for webhook path "${path}"`);
+			// Or handle as a bad request / unauthorized
+			throw new Error('Project context is missing for webhook execution.');
+		}
+
+		this.logger.debug(`Received webhook "${httpMethod}" for path "${path}" in project "${projectId}"`);
 
 		// Reset request parameters
 		request.params = {} as WebhookRequest['params'];
 
-		const webhook = await this.findWebhook(path, httpMethod);
+		const webhook = await this.findWebhook(path, httpMethod, projectId); // Pass projectId
 
 		if (webhook.isDynamic) {
 			const pathElements = path.split('/').slice(1);
@@ -157,8 +165,9 @@ export class LiveWebhooks implements IWebhookManager {
 			path = path.slice(0, -1);
 		}
 
-		const webhook = await this.webhookService.findWebhook(httpMethod, path);
-		const webhookMethods = await this.getWebhookMethods(path);
+		// Pass projectId to webhookService.findWebhook and this.getWebhookMethods
+		const webhook = await this.webhookService.findWebhook(httpMethod, path, projectId);
+		const webhookMethods = await this.getWebhookMethods(path, projectId);
 		if (webhook === null) {
 			throw new WebhookNotFoundError({ path, httpMethod, webhookMethods }, { hint: 'production' });
 		}

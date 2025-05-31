@@ -12,18 +12,24 @@ export class TagRepository extends Repository<TagEntity> {
 		super(TagEntity, dataSource.manager);
 	}
 
-	async findMany(tagIds: string[]) {
+	async findMany(tagIds: string[], projectId: string) {
 		return await this.find({
-			select: ['id', 'name'],
-			where: { id: In(tagIds) },
+			select: ['id', 'name', 'projectId'],
+			where: { id: In(tagIds), projectId },
 		});
 	}
 
 	/**
 	 * Set tags on workflow to import while ensuring all tags exist in the database,
 	 * either by matching incoming to existing tags or by creating them first.
+	 * This method assumes `dbTags` are already filtered for the relevant project.
 	 */
-	async setTags(tx: EntityManager, dbTags: TagEntity[], workflow: IWorkflowDb) {
+	async setTags(
+		tx: EntityManager,
+		dbTags: TagEntity[],
+		workflow: IWorkflowDb,
+		projectId: string,
+	) {
 		if (!workflow?.tags?.length) return;
 
 		for (let i = 0; i < workflow.tags.length; i++) {
@@ -31,9 +37,11 @@ export class TagRepository extends Repository<TagEntity> {
 
 			if (!importTag.name) continue;
 
+			// It's crucial that dbTags are pre-filtered for the projectId.
 			const identicalMatch = dbTags.find(
 				(dbTag) =>
 					dbTag.id === importTag.id &&
+					dbTag.projectId === projectId && // Ensure project match
 					dbTag.createdAt &&
 					importTag.createdAt &&
 					dbTag.createdAt.getTime() === new Date(importTag.createdAt).getTime(),
@@ -44,14 +52,18 @@ export class TagRepository extends Repository<TagEntity> {
 				continue;
 			}
 
-			const nameMatch = dbTags.find((dbTag) => dbTag.name === importTag.name);
+			// Match by name within the same project.
+			const nameMatch = dbTags.find(
+				(dbTag) => dbTag.name === importTag.name && dbTag.projectId === projectId,
+			);
 
 			if (nameMatch) {
 				workflow.tags[i] = nameMatch;
 				continue;
 			}
 
-			const tagEntity = this.create(importTag);
+			// If no match, create a new tag within the project.
+			const tagEntity = this.create({ ...importTag, projectId });
 
 			workflow.tags[i] = await tx.save<TagEntity>(tagEntity);
 		}
@@ -61,13 +73,18 @@ export class TagRepository extends Repository<TagEntity> {
 	 * Returns the workflow IDs that have certain tags.
 	 * Intersection! e.g. workflow needs to have all provided tags.
 	 */
-	async getWorkflowIdsViaTags(tags: string[]): Promise<string[]> {
+	async getWorkflowIdsViaTags(tags: string[], projectId: string): Promise<string[]> {
 		const dbTags = await this.find({
-			where: { name: In(tags) },
+			where: { name: In(tags), projectId }, // Filter by projectId
 			relations: ['workflows'],
 		});
 
-		const workflowIdsPerTag = dbTags.map((tag) => tag.workflows.map((workflow) => workflow.id));
+		// Filter workflows by project before extracting IDs
+		const workflowIdsPerTag = dbTags.map((tag) =>
+			tag.workflows
+				.filter((workflow) => workflow.projectId === projectId) // Ensure workflow is in the same project
+				.map((workflow) => workflow.id),
+		);
 
 		return intersection(...workflowIdsPerTag);
 	}

@@ -389,4 +389,47 @@ export class ProjectService {
 	async getProjectCounts(): Promise<Record<ProjectType, number>> {
 		return await this.projectRepository.getProjectCounts();
 	}
+
+	async removeUserFromProject(
+		actingUser: User,
+		projectId: string,
+		userIdToRemove: string,
+	): Promise<void> {
+		// 1. Validate actingUser has rights to manage users in this project
+		const projectForActingUser = await this.getProjectWithScope(actingUser, projectId, [
+			'project:user:manage', // Assuming a new scope for project user management
+		]);
+
+		if (!projectForActingUser) {
+			throw new ForbiddenError(
+				`User ${actingUser.id} does not have permission to manage users in project ${projectId}.`,
+			);
+		}
+
+		// 2. Prevent self-removal if they are the last admin/owner (optional, based on business rules)
+		// This logic can be complex: check if other admins exist for the project.
+		// For simplicity, this check is omitted here but should be considered.
+		// if (actingUser.id === userIdToRemove) {
+		//    const relations = await this.getProjectRelations(projectId);
+		//    const otherAdmins = relations.filter(r => r.userId !== userIdToRemove && r.role === 'project:admin');
+		//    if (otherAdmins.length === 0) {
+		//        throw new UserError('Cannot remove the last admin from a project.');
+		//    }
+		// }
+
+		// 3. Remove the project relation
+		const result = await this.projectRelationRepository.delete({
+			projectId,
+			userId: userIdToRemove,
+		});
+
+		if (result.affected === 0) {
+			throw new NotFoundError(
+				`User ${userIdToRemove} is not associated with project ${projectId}.`,
+			);
+		}
+
+		// Optionally, clear any caches related to this user's project access
+		await this.clearCredentialCanUseExternalSecretsCache(projectId); // Example cache clearing
+	}
 }

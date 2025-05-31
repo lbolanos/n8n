@@ -63,7 +63,8 @@ export class FolderService {
 			await this.folderRepository.update({ id: folderId }, { name });
 		}
 		if (tagIds) {
-			await this.folderTagMappingRepository.overwriteTags(folderId, tagIds);
+			// Pass projectId to ensure tags are handled within the folder's project context
+			await this.folderTagMappingRepository.overwriteTags(folderId, tagIds, projectId);
 		}
 
 		if (parentFolderId) {

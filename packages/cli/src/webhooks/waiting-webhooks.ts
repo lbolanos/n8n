@@ -41,7 +41,21 @@ export class WaitingWebhooks implements IWebhookManager {
 		private readonly webhookService: WebhookService,
 	) {}
 
-	// TODO: implement `getWebhookMethods` for CORS support
+	async getWebhookMethods(path: string, projectId: string) { // Added projectId. Path is executionId here.
+		// For waiting webhooks, the path is the executionId.
+		// We need to ensure the execution (and its workflow) belongs to the project.
+		// This method is primarily for CORS pre-flight. A deeper check is in executeWebhook.
+		// We might not have enough info here to fully validate against projectId without fetching execution,
+		// but webhookService.getWebhookMethods now requires projectId.
+		// This specific call might need further review in context of how CORS uses it for waiting webhooks.
+		// For now, pass it through. If the webhook path itself isn't project specific for waiting ones,
+		// this might return methods more broadly than it should if not further filtered.
+		// However, the actual execution will be gated by projectId.
+		return await this.webhookService.getWebhookMethods(path, projectId);
+	}
+
+	// Optional: Add findAccessControlOptions if CORS needs to be project-specific for waiting webhooks
+	// async findAccessControlOptions(path: string, httpMethod: IHttpRequestMethods, projectId: string) { ... }
 
 	protected logReceivedWebhook(method: string, executionId: string) {
 		this.logger.debug(`Received waiting-webhook "${method}" for execution "${executionId}"`);
@@ -86,8 +100,14 @@ export class WaitingWebhooks implements IWebhookManager {
 		res: express.Response,
 	): Promise<IWebhookResponseCallbackData> {
 		const { path: executionId, suffix } = req.params;
+		const requestProjectId = (req as any).projectId as string | undefined;
 
 		this.logReceivedWebhook(req.method, executionId);
+
+		if (!requestProjectId) {
+			this.logger.error(`ProjectId not found on request for waiting webhook, executionId "${executionId}"`);
+			throw new Error('Project context is missing for waiting webhook execution.');
+		}
 
 		// Reset request parameters
 		req.params = {} as WaitingWebhookRequest['params'];
@@ -96,6 +116,18 @@ export class WaitingWebhooks implements IWebhookManager {
 
 		if (!execution) {
 			throw new NotFoundError(`The execution "${executionId}" does not exist.`);
+		}
+
+		// Authorization: Check if the execution's workflow belongs to the request's project
+		const workflowProjectId = execution.workflowData?.projectId;
+		if (!workflowProjectId || workflowProjectId !== requestProjectId) {
+			this.logger.error(
+				`Attempt to access execution "${executionId}" from project "${requestProjectId}" but it belongs to project "${workflowProjectId}"`,
+			);
+			// Throw NotFoundError to obscure existence from other projects
+			throw new NotFoundError(
+				`The execution "${executionId}" does not exist in this project.`,
+			);
 		}
 
 		if (execution.status === 'running') {

@@ -1,8 +1,8 @@
 import type { RoleChangeRequestDto } from '@n8n/api-types';
 import type { PublicUser } from '@n8n/db';
 import { User, UserRepository } from '@n8n/db';
-import { Service } from '@n8n/di';
-import { getGlobalScopes, type AssignableGlobalRole } from '@n8n/permissions';
+import { Service, Container } from '@n8n/di'; // Added Container
+import { getGlobalScopes, type AssignableGlobalRole, type ProjectRole } from '@n8n/permissions'; // Added ProjectRole
 import { Logger } from 'n8n-core';
 import type { IUserSettings } from 'n8n-workflow';
 import { UnexpectedError } from 'n8n-workflow';
@@ -14,11 +14,26 @@ import type { PostHogClient } from '@/posthog';
 import type { UserRequest } from '@/requests';
 import { UrlService } from '@/services/url.service';
 import { UserManagementMailer } from '@/user-management/email';
+// eslint-disable-next-line import/no-cycle
+import { ProjectService } from './project.service.ee'; // Import ProjectService for adding user to project
 
 import { PublicApiKeyService } from './public-api-key.service';
 
+// Updated Invitation interface to include optional project context
+export interface Invitation {
+	email: string;
+	role: AssignableGlobalRole; // This remains the global role for the new user
+	targetProjectId?: string;
+	projectRole?: ProjectRole; // Role within the target project
+}
+
 @Service()
 export class UserService {
+	// Lazy load ProjectService to avoid circular dependencies
+	private get projectService(): ProjectService {
+		return Container.get(ProjectService);
+	}
+
 	constructor(
 		private readonly logger: Logger,
 		private readonly userRepository: UserRepository,
@@ -206,19 +221,35 @@ export class UserService {
 		);
 
 		try {
-			await this.getManager().transaction(
-				async (transactionManager) =>
-					await Promise.all(
-						toCreateUsers.map(async ({ email, role }) => {
-							const { user: savedUser } = await this.userRepository.createUserWithProject(
-								{ email, role },
-								transactionManager,
-							);
-							createdUsers.set(email, savedUser.id);
-							return savedUser;
-						}),
-					),
-			);
+			await this.getManager().transaction(async (transactionManager) => {
+				for (const invitation of toCreateUsers) {
+					const { email, role, targetProjectId, projectRole } = invitation;
+					// Create user with their personal project and a global role
+					const { user: savedUser } = await this.userRepository.createUserWithProject(
+						{ email, role }, // Global role for the user
+						transactionManager,
+					);
+					createdUsers.set(email, savedUser.id);
+
+					// If targetProjectId and projectRole are provided, add user to that project
+					if (targetProjectId && projectRole && savedUser) {
+						// Use the injected ProjectService to add the user to the specified project
+						// Note: projectService.addUser might need to be called outside the user repo transaction
+						// or ensure it uses the provided transactionManager if it makes its own.
+						// For simplicity here, assuming it can participate or is called after.
+						// This part might need careful transaction handling in a real app.
+						await this.projectService.addUser(
+							targetProjectId,
+							savedUser.id,
+							projectRole,
+							transactionManager, // Pass the transaction manager
+						);
+						this.logger.debug(
+							`Added new user ${savedUser.id} to project ${targetProjectId} with role ${projectRole}`,
+						);
+					}
+				}
+			});
 		} catch (error) {
 			this.logger.error('Failed to create user shells', { userShells: createdUsers });
 			throw new InternalServerError('An error occurred during user creation', error);

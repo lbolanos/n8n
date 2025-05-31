@@ -42,41 +42,54 @@ export class WebhookService {
 		return await this.webhookRepository.find();
 	}
 
-	private async findCached(method: Method, path: string) {
-		const cacheKey = `webhook:${method}-${path}`;
+	// Updated cache key to include projectId
+	private getCacheKey(method: Method, path: string, projectId?: string): string {
+		if (projectId) {
+			return `webhook:${projectId}:${method}-${path}`;
+		}
+		// Fallback for global webhooks if any (should be reviewed if all webhooks become project-specific)
+		return `webhook:${method}-${path}`;
+	}
+
+	private async findCached(method: Method, path: string, projectId?: string) {
+		const cacheKey = this.getCacheKey(method, path, projectId);
 
 		const cachedStaticWebhook = await this.cacheService.get(cacheKey);
 
 		if (cachedStaticWebhook) return this.webhookRepository.create(cachedStaticWebhook);
 
-		const dbStaticWebhook = await this.findStaticWebhook(method, path);
+		// Pass projectId to findStaticWebhook and findDynamicWebhook
+		const dbStaticWebhook = await this.findStaticWebhook(method, path, projectId);
 
 		if (dbStaticWebhook) {
-			void this.cacheService.set(cacheKey, dbStaticWebhook);
+			void this.cacheService.set(cacheKey, dbStaticWebhook); // Use the same generated cacheKey
 			return dbStaticWebhook;
 		}
 
-		return await this.findDynamicWebhook(method, path);
+		return await this.findDynamicWebhook(method, path, projectId);
 	}
 
 	/**
 	 * Find a matching webhook with zero dynamic path segments, e.g. `<uuid>` or `user/profile`.
 	 */
-	private async findStaticWebhook(method: Method, path: string) {
-		return await this.webhookRepository.findOneBy({ webhookPath: path, method });
+	private async findStaticWebhook(method: Method, path: string, projectId?: string) {
+		// Add projectId to the query
+		return await this.webhookRepository.findOneBy({ webhookPath: path, method, projectId });
 	}
 
 	/**
 	 * Find a matching webhook with one or more dynamic path segments, e.g. `<uuid>/user/:id/posts`.
 	 * It is mandatory for dynamic webhooks to have `<uuid>/` at the base.
 	 */
-	private async findDynamicWebhook(method: Method, path: string) {
+	private async findDynamicWebhook(method: Method, path: string, projectId?: string) {
 		const [uuidSegment, ...otherSegments] = path.split('/');
 
+		// Add projectId to the query
 		const dynamicWebhooks = await this.webhookRepository.findBy({
 			webhookId: uuidSegment,
 			method,
 			pathLength: otherSegments.length,
+			projectId,
 		});
 
 		if (dynamicWebhooks.length === 0) return null;
@@ -106,14 +119,22 @@ export class WebhookService {
 		return webhook;
 	}
 
-	async findWebhook(method: Method, path: string) {
-		return await this.findCached(method, path);
+	async findWebhook(method: Method, path: string, projectId?: string) {
+		return await this.findCached(method, path, projectId);
 	}
 
 	async storeWebhook(webhook: WebhookEntity) {
-		void this.cacheService.set(webhook.cacheKey, webhook);
+		if (!webhook.projectId) {
+			throw new Error('Attempted to store a webhook without a projectId.');
+		}
+		// Use the same cache key generation method.
+		// Note: webhook.cacheKey getter on WebhookEntity itself would need to be updated
+		// to be aware of projectId for consistency if used directly elsewhere.
+		const cacheKey = this.getCacheKey(webhook.method, webhook.webhookPath, webhook.projectId);
+		void this.cacheService.set(cacheKey, webhook);
 
-		await this.webhookRepository.upsert(webhook, ['method', 'webhookPath']);
+		// Update conflict target to include projectId
+		await this.webhookRepository.upsert(webhook, ['method', 'webhookPath', 'projectId']);
 	}
 
 	createWebhook(data: Partial<WebhookEntity>) {
@@ -132,9 +153,9 @@ export class WebhookService {
 		return await this.webhookRepository.remove(webhooks);
 	}
 
-	async getWebhookMethods(path: string) {
+	async getWebhookMethods(path: string, projectId?: string) {
 		return await this.webhookRepository
-			.find({ select: ['method'], where: { webhookPath: path } })
+			.find({ select: ['method'], where: { webhookPath: path, projectId } }) // Add projectId
 			.then((rows) => rows.map((r) => r.method));
 	}
 

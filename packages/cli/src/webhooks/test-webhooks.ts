@@ -49,6 +49,51 @@ export class TestWebhooks implements IWebhookManager {
 
 	private timeouts: { [webhookKey: string]: NodeJS.Timeout } = {};
 
+	// TODO: Test webhook registrations are currently global.
+	// For true project-scoping, TestWebhookRegistrationsService would need to store projectId,
+	// and these methods would filter by it. For now, projectId is added to match IWebhookManager.
+	async getWebhookMethods(path: string, projectId?: string) { // Added projectId
+		const allKeys = await this.registrations.getAllKeys();
+
+		// This doesn't currently use projectId for filtering, needs TestWebhookRegistrationsService update
+		const webhookMethods = allKeys
+			.filter((key) => key.includes(path))
+			.map((key) => key.split('|')[0] as IHttpRequestMethods);
+
+		if (!webhookMethods.length) throw new WebhookNotFoundError({ path });
+
+		return webhookMethods;
+	}
+
+	async findAccessControlOptions(path: string, httpMethod: IHttpRequestMethods, projectId?: string) { // Added projectId
+		const allKeys = await this.registrations.getAllKeys();
+
+		// This doesn't currently use projectId for filtering
+		const webhookKey = allKeys.find((key) => key.includes(path) && key.startsWith(httpMethod));
+
+		if (!webhookKey) return;
+
+		const registration = await this.registrations.get(webhookKey);
+
+		if (!registration) return;
+		// TODO: Add projectId check if registration becomes project-aware:
+		// if (registration.workflowEntity.projectId !== projectId) return;
+
+
+		const { workflowEntity } = registration;
+
+		const workflow = this.toWorkflow(workflowEntity);
+
+		const webhookNode = Object.values(workflow.nodes).find(
+			({ type, parameters, typeVersion }) =>
+				parameters?.path === path &&
+				(parameters?.httpMethod ?? 'GET') === httpMethod &&
+				'webhook' in this.nodeTypes.getByNameAndVersion(type, typeVersion),
+		);
+
+		return webhookNode?.parameters?.options as WebhookAccessControlOptions;
+	}
+
 	/**
 	 * Return a promise that resolves when the test webhook is called.
 	 * Also inform the FE of the result and remove the test webhook.
@@ -58,6 +103,7 @@ export class TestWebhooks implements IWebhookManager {
 		response: express.Response,
 	): Promise<IWebhookResponseCallbackData> {
 		const httpMethod = request.method;
+		// const requestProjectId = (request as any).projectId as string | undefined; // Available if set by middleware
 
 		let path = removeTrailingSlash(request.params.path);
 
@@ -69,6 +115,9 @@ export class TestWebhooks implements IWebhookManager {
 			// no static webhook, so check if dynamic
 			// e.g. `/webhook-test/<uuid>/user/:id/create`
 
+			// When calling getActiveWebhook for dynamic paths, projectId might be needed
+			// if test registrations become project-scoped.
+
 			const [webhookId, ...segments] = path.split('/');
 
 			webhook = await this.getActiveWebhook(httpMethod, segments.join('/'), webhookId);
@@ -77,7 +126,8 @@ export class TestWebhooks implements IWebhookManager {
 				throw new WebhookNotFoundError({
 					path,
 					httpMethod,
-					webhookMethods: await this.getWebhookMethods(path),
+					// Pass projectId if available and getWebhookMethods uses it for filtering
+					webhookMethods: await this.getWebhookMethods(path /*, requestProjectId */),
 				});
 
 			path = webhook.path;
@@ -97,11 +147,18 @@ export class TestWebhooks implements IWebhookManager {
 			throw new WebhookNotFoundError({
 				path,
 				httpMethod,
-				webhookMethods: await this.getWebhookMethods(path),
+				// Pass projectId if available and getWebhookMethods uses it for filtering
+				webhookMethods: await this.getWebhookMethods(path /*, requestProjectId */),
 			});
 		}
 
 		const { destinationNode, pushRef, workflowEntity, webhook: testWebhook } = registration;
+		const workflowProjectId = workflowEntity.projectId;
+
+		// Optional: Validate requestProjectId against workflowProjectId if both are available
+		// if (requestProjectId && workflowProjectId && requestProjectId !== workflowProjectId) {
+		//   throw new Error('Project ID mismatch for test webhook.');
+		// }
 
 		const workflow = this.toWorkflow(workflowEntity);
 
@@ -172,43 +229,6 @@ export class TestWebhooks implements IWebhookManager {
 		const timeout = this.timeouts[key];
 
 		if (timeout) clearTimeout(timeout);
-	}
-
-	async getWebhookMethods(path: string) {
-		const allKeys = await this.registrations.getAllKeys();
-
-		const webhookMethods = allKeys
-			.filter((key) => key.includes(path))
-			.map((key) => key.split('|')[0] as IHttpRequestMethods);
-
-		if (!webhookMethods.length) throw new WebhookNotFoundError({ path });
-
-		return webhookMethods;
-	}
-
-	async findAccessControlOptions(path: string, httpMethod: IHttpRequestMethods) {
-		const allKeys = await this.registrations.getAllKeys();
-
-		const webhookKey = allKeys.find((key) => key.includes(path) && key.startsWith(httpMethod));
-
-		if (!webhookKey) return;
-
-		const registration = await this.registrations.get(webhookKey);
-
-		if (!registration) return;
-
-		const { workflowEntity } = registration;
-
-		const workflow = this.toWorkflow(workflowEntity);
-
-		const webhookNode = Object.values(workflow.nodes).find(
-			({ type, parameters, typeVersion }) =>
-				parameters?.path === path &&
-				(parameters?.httpMethod ?? 'GET') === httpMethod &&
-				'webhook' in this.nodeTypes.getByNameAndVersion(type, typeVersion),
-		);
-
-		return webhookNode?.parameters?.options as WebhookAccessControlOptions;
 	}
 
 	/**
@@ -287,6 +307,7 @@ export class TestWebhooks implements IWebhookManager {
 
 			webhook.path = removeTrailingSlash(webhook.path);
 			webhook.isTest = true;
+			webhook.projectId = workflowEntity.projectId; // Set projectId on the webhook data
 
 			/**
 			 * Additional data cannot be cached because of circular refs.
@@ -295,6 +316,7 @@ export class TestWebhooks implements IWebhookManager {
 			const { workflowExecuteAdditionalData: _, ...cacheableWebhook } = webhook;
 
 			cacheableWebhook.userId = userId;
+			// projectId is already part of cacheableWebhook via webhook.projectId
 
 			const registration: TestWebhookRegistration = {
 				pushRef,
@@ -304,12 +326,20 @@ export class TestWebhooks implements IWebhookManager {
 			};
 
 			try {
+				// Ensure projectId is on the webhook object before creating registration key
+				if (!webhook.projectId) {
+					throw new Error(
+						`Workflow entity for workflow ${workflowEntity.id} is missing projectId, cannot register test webhook.`,
+					);
+				}
+
 				/**
 				 * Register the test webhook _before_ creation at third-party service
 				 * in case service sends a confirmation request immediately on creation.
 				 */
 				await this.registrations.register(registration);
 
+				// WebhookService.createWebhookIfNotExists internally uses webhook.projectId for uniqueness
 				await this.webhookService.createWebhookIfNotExists(workflow, webhook, 'manual', 'manual');
 
 				cacheableWebhook.staticData = workflow.staticData;
@@ -424,9 +454,13 @@ export class TestWebhooks implements IWebhookManager {
 			if (userId) {
 				webhook.workflowExecuteAdditionalData = await WorkflowExecuteAdditionalData.getBase(userId);
 			}
+			// Ensure projectId is on the webhook object before passing to deleteWebhook
+			webhook.projectId = workflow.projectId;
+
 
 			if (staticData) workflow.staticData = staticData;
 
+			// WebhookService.deleteWebhook might use webhook.projectId if it needs to reconstruct cache keys or similar
 			await this.webhookService.deleteWebhook(workflow, webhook, 'internal', 'update');
 		}
 
@@ -445,8 +479,9 @@ export class TestWebhooks implements IWebhookManager {
 			connections: workflowEntity.connections,
 			active: false,
 			nodeTypes: this.nodeTypes,
-			staticData: {},
+			staticData: {}, // Test webhooks might have their own static data managed by registration
 			settings: workflowEntity.settings,
+			projectId: workflowEntity.projectId, // Ensure projectId is part of the Workflow object
 		});
 	}
 }

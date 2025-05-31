@@ -416,13 +416,22 @@ export class ExecutionService {
 		);
 	}
 
-	async stop(executionId: string): Promise<StopResult> {
-		const execution = await this.executionRepository.findSingleExecution(executionId, {
-			includeData: true,
-			unflattenData: true,
-		});
+	async stop(executionId: string, sharedWorkflowIds: string[]): Promise<StopResult> {
+		// Authorize first: Check if the user has access to the workflow of this execution
+		// findWithUnflattenedData checks if workflowId is in sharedWorkflowIds and fetches necessary data.
+		const execution = await this.executionRepository.findWithUnflattenedData(
+			executionId,
+			sharedWorkflowIds,
+		);
 
-		if (!execution) throw new MissingExecutionStopError(executionId);
+		if (!execution) {
+			// Log attempt if needed, similar to findOne
+			this.logger.info(
+				'Attempt to stop execution was blocked due to insufficient permissions or execution not found.',
+				{ executionId }, // Consider adding userId if available on req context
+			);
+			throw new MissingExecutionStopError(executionId);
+		}
 
 		this.assertStoppable(execution);
 

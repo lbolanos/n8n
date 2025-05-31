@@ -153,6 +153,7 @@ export class ActiveWorkflowManager {
 	 */
 	async addWebhooks(
 		workflow: Workflow,
+		projectId: string, // Added projectId
 		additionalData: IWorkflowExecuteAdditionalData,
 		mode: WorkflowExecuteMode,
 		activation: WorkflowActivateMode,
@@ -173,6 +174,7 @@ export class ActiveWorkflowManager {
 				webhookPath: path,
 				node: node.name,
 				method: webhookData.httpMethod,
+				projectId, // Set projectId
 			});
 
 			if (webhook.webhookPath.startsWith('/')) {
@@ -592,6 +594,7 @@ export class ActiveWorkflowManager {
 			if (shouldAddWebhooks) {
 				added.webhooks = await this.addWebhooks(
 					workflow,
+					dbWorkflow.projectId, // Pass projectId
 					additionalData,
 					'trigger',
 					activationMode,

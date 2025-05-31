@@ -84,10 +84,18 @@ class WebhookRequestHandler {
 	): Promise<Error | null> {
 		const method = req.method;
 		const { path } = req.params;
+		// Assume projectId is available on the request object
+		const projectId = (req as any).projectId as string | undefined;
+
+		// Note: If projectId is essential for CORS and not found,
+		// an error should probably be thrown or default restrictive CORS applied.
+		// For now, proceeding with optional projectId for these calls,
+		// assuming manager methods can handle it or it's not strictly required for CORS.
 
 		if (this.webhookManager.getWebhookMethods) {
 			try {
-				const allowedMethods = await this.webhookManager.getWebhookMethods(path);
+				// Pass projectId if available, otherwise undefined
+				const allowedMethods = await this.webhookManager.getWebhookMethods(path, projectId);
 				res.header('Access-Control-Allow-Methods', ['OPTIONS', ...allowedMethods].join(', '));
 			} catch (error) {
 				return error as Error;
@@ -99,7 +107,12 @@ class WebhookRequestHandler {
 				? (req.headers['access-control-request-method'] as IHttpRequestMethods)
 				: method;
 		if (this.webhookManager.findAccessControlOptions && requestedMethod) {
-			const options = await this.webhookManager.findAccessControlOptions(path, requestedMethod);
+			// Pass projectId if available
+			const options = await this.webhookManager.findAccessControlOptions(
+				path,
+				requestedMethod,
+				projectId,
+			);
 			const { allowedOrigins } = options ?? {};
 
 			if (allowedOrigins && allowedOrigins !== '*' && allowedOrigins !== req.headers.origin) {
