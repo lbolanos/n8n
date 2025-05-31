@@ -4,7 +4,6 @@ import WorkflowDetails from '@/components/MainHeader/WorkflowDetails.vue';
 import { useI18n } from '@/composables/useI18n';
 import { usePushConnection } from '@/composables/usePushConnection';
 import {
-	LOCAL_STORAGE_HIDE_GITHUB_STAR_BUTTON,
 	MAIN_HEADER_TABS,
 	PLACEHOLDER_EMPTY_WORKFLOW_ID,
 	STICKY_NODE_TYPE,
@@ -24,7 +23,6 @@ import type { RouteLocation, RouteLocationRaw } from 'vue-router';
 import { useRoute, useRouter } from 'vue-router';
 
 import { useLocalStorage } from '@vueuse/core';
-import GithubButton from 'vue-github-button';
 import type { FolderShortInfo } from '@/Interface';
 
 const router = useRouter();
@@ -43,7 +41,6 @@ const activeHeaderTab = ref(MAIN_HEADER_TABS.WORKFLOW);
 const workflowToReturnTo = ref('');
 const executionToReturnTo = ref('');
 const dirtyState = ref(false);
-const githubButtonHidden = useLocalStorage(LOCAL_STORAGE_HIDE_GITHUB_STAR_BUTTON, false);
 
 // Track the routes that are used for the tabs
 // This is used to determine which tab to show when the route changes
@@ -85,9 +82,6 @@ const onWorkflowPage = computed(() => !!(route.meta.nodeView || route.meta.keepW
 const readOnly = computed(() => sourceControlStore.preferences.branchReadOnly);
 const isEnterprise = computed(
 	() => settingsStore.isQueueModeEnabled && settingsStore.isWorkerViewAvailable,
-);
-const showGitHubButton = computed(
-	() => !isEnterprise.value && !settingsStore.settings.inE2ETests && !githubButtonHidden.value,
 );
 
 const parentFolderForBreadcrumbs = computed<FolderShortInfo | undefined>(() => {
@@ -242,10 +236,6 @@ async function navigateToEvaluationsView(openInNewTab: boolean) {
 		await router.push(routeToNavigateTo);
 	}
 }
-
-function hideGithubButton() {
-	githubButtonHidden.value = true;
-}
 </script>
 
 <template>
@@ -266,25 +256,6 @@ function hideGithubButton() {
 					:current-folder="parentFolderForBreadcrumbs"
 					:is-archived="workflow.isArchived"
 				/>
-				<div v-if="showGitHubButton" :class="[$style['github-button'], 'hidden-sm-and-down']">
-					<div :class="$style['github-button-container']">
-						<GithubButton
-							:href="N8N_MAIN_GITHUB_REPO_URL"
-							:data-color-scheme="uiStore.appliedTheme"
-							data-size="large"
-							data-show-count="true"
-							:aria-label="locale.baseText('editor.mainHeader.githubButton.label')"
-						>
-							{{ locale.baseText('generic.star') }}
-						</GithubButton>
-						<N8nIcon
-							:class="$style['close-github-button']"
-							icon="times-circle"
-							size="medium"
-							@click="hideGithubButton"
-						/>
-					</div>
-				</div>
 			</div>
 			<TabBar
 				v-if="onWorkflowPage"
