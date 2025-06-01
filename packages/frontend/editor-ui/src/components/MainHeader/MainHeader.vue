@@ -9,7 +9,6 @@ import {
 	STICKY_NODE_TYPE,
 	VIEWS,
 	WORKFLOW_EVALUATION_EXPERIMENT,
-	N8N_MAIN_GITHUB_REPO_URL,
 } from '@/constants';
 import { useExecutionsStore } from '@/stores/executions.store';
 import { useNDVStore } from '@/stores/ndv.store';

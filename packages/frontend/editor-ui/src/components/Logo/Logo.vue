@@ -3,8 +3,8 @@ import type { FrontendSettings } from '@n8n/api-types';
 import { computed, onMounted, useCssModule, useTemplateRef } from 'vue';
 import { useFavicon } from '@vueuse/core';
 
-import LogoIcon from './logo-icon.svg';
-import LogoText from './logo-text.svg';
+// import LogoIcon from './logo-icon.svg';
+// import LogoText from './logo-text.svg';
 
 const props = defineProps<
 	(
@@ -57,8 +57,8 @@ onMounted(() => {
 
 <template>
 	<div :class="containerClasses" data-test-id="n8n-logo">
-		<LogoIcon ref="logo" :class="$style.logo" />
-		<LogoText v-if="showLogoText" :class="$style.logoText" />
+		<img src="https://cariai.com/img/logos/logo50.png" alt="Cari AI Logo" class="logo" />
+		<div class="logo-label">Cari AI</div>
 		<slot />
 	</div>
 </template>
@@ -87,9 +87,12 @@ onMounted(() => {
 	transform: scale(1.3) translateY(-2px);
 }
 
-.logoText {
-	margin-left: var(--spacing-xs);
-	margin-right: var(--spacing-3xs);
+.logo-label {
+	text-transform: none;
+	letter-spacing: 1px;
+	font-size: 2rem;
+	font-weight: bold;
+	font-family: 'Comfortaa', sans-serif;
 }
 
 .sidebarExpanded .logo {

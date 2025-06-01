@@ -111,3 +111,14 @@ Search and organize past workflow executions for easier review
 📁
 Folders
 Organize your workflows in a nested folder structure
+
+
+
+nvm install 20
+nvm use 20
+
+corepack enable
+rm -rf node_modules package-lock.json
+pnpm install
+pnpm run build
+pnpm run dev
