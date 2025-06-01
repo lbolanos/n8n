@@ -93,9 +93,11 @@ Resources:
             POSTGRES_PASSWORD=$(jq -r .password <<< "${DB_SECRET}")
 
 
-            # Pull n8n Docker image (replace with your desired version if not 'latest')
+            # Pull n8n Docker image from ECR
             N8N_VERSION="latest" # Or get from an environment variable / Parameter Store
-            docker pull n8nio/n8n:${N8N_VERSION}
+            AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+            aws ecr get-login-password --region "${REGION}" | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com
+            docker pull ${AWS_ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/n8n-${self:custom.stage}:${self:custom.stage}
 
             export AUTH_KEY="${self:provider.environment.AUTH_KEY}"
 
@@ -118,7 +120,7 @@ Resources:
               -e WEBHOOK_URL="https://flux.getgik.com/" \
               -e N8N_RUNNERS_ENABLED="true" \
               -e N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS="true" \
-              n8nio/n8n:${N8N_VERSION}
+              ${AWS_ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/n8n-${self:custom.stage}:${self:custom.stage}
 
             # Get n8n Docker container ID
             N8N_CONTAINER_ID=$(docker inspect --format='{{.Id}}' n8n_container)

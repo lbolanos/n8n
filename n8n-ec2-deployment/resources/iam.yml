@@ -32,11 +32,15 @@ Resources:
               - Effect: Allow
                 Action:
                   - ecr:GetAuthorizationToken
+                Resource:
+                  - "*"
+              - Effect: Allow
+                Action:
                   - ecr:BatchCheckLayerAvailability
                   - ecr:GetDownloadUrlForLayer
                   - ecr:BatchGetImage
                 Resource:
-                  - !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/n8n-ecr-repo # Replace with your actual ECR repo name
+                  - !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/n8n-${self:custom.stage}
               - Effect: Allow
                 Action:
                   - s3:GetObject

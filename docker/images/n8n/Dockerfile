@@ -30,8 +30,8 @@ ENV N8N_RELEASE_TYPE=${N8N_RELEASE_TYPE}
 
 LABEL org.opencontainers.image.title="n8n"
 LABEL org.opencontainers.image.description="Workflow Automation Tool"
-LABEL org.opencontainers.image.source="https://github.com/n8n-io/n8n"
-LABEL org.opencontainers.image.url="https://n8n.io"
+#LABEL org.opencontainers.image.source="https://github.com/n8n-io/n8n"
+#LABEL org.opencontainers.image.url="https://n8n.io"
 LABEL org.opencontainers.image.version=${N8N_VERSION}
 
 WORKDIR /home/node

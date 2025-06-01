@@ -23,133 +23,135 @@ Resources:
           AssociatePublicIpAddress: !If [IsProd, false, true]
       UserData:
         Fn::Base64: |
-          #!/bin/bash -xe
-          # user_data.sh
-          # sudo su
-          # less /var/log/cloud-init-output.log
+            #!/bin/bash -xe
+            # user_data.sh
+            # sudo su
+            # less /var/log/cloud-init-output.log
 
-          # Install updates and Docker
-          yum update -y
-          amazon-linux-extras install docker -y
-          systemctl enable docker
-          systemctl start docker
-          usermod -a -G docker ec2-user
+            # Install updates and Docker
+            yum update -y
+            amazon-linux-extras install docker -y
+            systemctl enable docker
+            systemctl start docker
+            usermod -a -G docker ec2-user
 
-          # Install amazon-efs-utils for EFS
-          yum install -y amazon-efs-utils
+            # Install amazon-efs-utils for EFS
+            yum install -y amazon-efs-utils
 
-          # Install jq for JSON parsing
-          yum install -y jq
+            # Install jq for JSON parsing
+            yum install -y jq
 
-          # EFS Configuration (Replace with your EFS File System ID and mount point options)
-          export EFS_FILE_SYSTEM_ID="${self:provider.environment.EFS_FILE_SYSTEM_ID}"  # Get this from efs.yml output or AWS console
-          export EFS_ACCESS_POINT_ID="${self:provider.environment.EFS_ACCESS_POINT_ID}"  # Get this from efs.yml output or CloudFormation export
-          EFS_MOUNT_POINT="/mnt/efs/n8n_data"
-          N8N_LOCAL_DATA_DIR="/home/ec2-user/n8n_data" # Local mount point for Docker volume
+            # EFS Configuration (Replace with your EFS File System ID and mount point options)
+            export EFS_FILE_SYSTEM_ID="${self:provider.environment.EFS_FILE_SYSTEM_ID}"  # Get this from efs.yml output or AWS console
+            export EFS_ACCESS_POINT_ID="${self:provider.environment.EFS_ACCESS_POINT_ID}"  # Get this from efs.yml output or CloudFormation export
+            EFS_MOUNT_POINT="/mnt/efs/n8n_data"
+            N8N_LOCAL_DATA_DIR="/home/ec2-user/n8n_data" # Local mount point for Docker volume
 
-          mkdir -p ${EFS_MOUNT_POINT}
-          mkdir -p ${N8N_LOCAL_DATA_DIR}
+            mkdir -p ${EFS_MOUNT_POINT}
+            mkdir -p ${N8N_LOCAL_DATA_DIR}
 
-          # Mount EFS (add retries or checks for production)
-          # Check if already mounted (for reboots if not fstab)
-          if ! grep -qs "${EFS_MOUNT_POINT} " /proc/mounts; then
-            # Mount with EFS Access Point
-            mount -t efs -o tls,accesspoint=${EFS_ACCESS_POINT_ID} ${EFS_FILE_SYSTEM_ID}:/ ${EFS_MOUNT_POINT}
-            # Add to /etc/fstab for persistence across reboots
-            echo "${EFS_FILE_SYSTEM_ID}:/ ${EFS_MOUNT_POINT} efs _netdev,tls,accesspoint=${EFS_ACCESS_POINT_ID} 0 0" >> /etc/fstab
-          fi
+            # Mount EFS (add retries or checks for production)
+            # Check if already mounted (for reboots if not fstab)
+            if ! grep -qs "${EFS_MOUNT_POINT} " /proc/mounts; then
+              # Mount with EFS Access Point
+              mount -t efs -o tls,accesspoint=${EFS_ACCESS_POINT_ID} ${EFS_FILE_SYSTEM_ID}:/ ${EFS_MOUNT_POINT}
+              # Add to /etc/fstab for persistence across reboots
+              echo "${EFS_FILE_SYSTEM_ID}:/ ${EFS_MOUNT_POINT} efs _netdev,tls,accesspoint=${EFS_ACCESS_POINT_ID} 0 0" >> /etc/fstab
+            fi
 
-          # Link EFS mount to where Docker will map its volume
-          # Ensure the user running Docker (ec2-user) or the user inside the container (node, UID 1000) has permissions
-          # The n8n container runs as user 'node' (UID 1000). EFS needs to allow this.
-          # One way is to chown after mounting to the UID/GID used by the container.
-          # This needs to be done carefully.
-          # For simplicity here, we'll ensure the local path used by Docker is writable.
-          # A better way for EFS is to use an EFS Access Point with the correct POSIX UID/GID.
-          mount --bind ${EFS_MOUNT_POINT} ${N8N_LOCAL_DATA_DIR}
-          # Ownership is managed by EFS Access Point; no need to chown
+            # Link EFS mount to where Docker will map its volume
+            # Ensure the user running Docker (ec2-user) or the user inside the container (node, UID 1000) has permissions
+            # The n8n container runs as user 'node' (UID 1000). EFS needs to allow this.
+            # One way is to chown after mounting to the UID/GID used by the container.
+            # This needs to be done carefully.
+            # For simplicity here, we'll ensure the local path used by Docker is writable.
+            # A better way for EFS is to use an EFS Access Point with the correct POSIX UID/GID.
+            mount --bind ${EFS_MOUNT_POINT} ${N8N_LOCAL_DATA_DIR}
+            # Ownership is managed by EFS Access Point; no need to chown
 
-          # Fetch secrets from AWS Secrets Manager
-          # This requires the EC2 instance to have an IAM role with permission to read the secret.
-          # AWS CLI needs to be available (usually is on Amazon Linux 2)
-          REGION=${self:provider.region}
-          DB_PASSWORD_SECRET_ARN="${self:provider.environment.DB_CLUSTER_ARN}"
-          DB_SECRET=$(aws secretsmanager get-secret-value --secret-id "${DB_PASSWORD_SECRET_ARN}" --region "${REGION}" --query SecretString --output text)
-          POSTGRES_DB_HOST=$(jq -r .host <<< "${DB_SECRET}")
-          POSTGRES_DB_NAME=$(jq -r .dbname <<< "${DB_SECRET}")
-          POSTGRES_USER=$(jq -r .username <<< "${DB_SECRET}")
-          POSTGRES_PASSWORD=$(jq -r .password <<< "${DB_SECRET}")
+            # Fetch secrets from AWS Secrets Manager
+            # This requires the EC2 instance to have an IAM role with permission to read the secret.
+            # AWS CLI needs to be available (usually is on Amazon Linux 2)
+            REGION=${self:provider.region}
+            DB_PASSWORD_SECRET_ARN="${self:provider.environment.DB_CLUSTER_ARN}"
+            DB_SECRET=$(aws secretsmanager get-secret-value --secret-id "${DB_PASSWORD_SECRET_ARN}" --region "${REGION}" --query SecretString --output text)
+            POSTGRES_DB_HOST=$(jq -r .host <<< "${DB_SECRET}")
+            POSTGRES_DB_NAME=$(jq -r .dbname <<< "${DB_SECRET}")
+            POSTGRES_USER=$(jq -r .username <<< "${DB_SECRET}")
+            POSTGRES_PASSWORD=$(jq -r .password <<< "${DB_SECRET}")
 
 
-          # Pull n8n Docker image (replace with your desired version if not 'latest')
-          N8N_VERSION="latest" # Or get from an environment variable / Parameter Store
-          docker pull n8nio/n8n:${N8N_VERSION}
+            # Pull n8n Docker image from ECR
+            N8N_VERSION="latest" # Or get from an environment variable / Parameter Store
+            AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+            aws ecr get-login-password --region "${REGION}" | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com
+            docker pull ${AWS_ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/n8n-${self:custom.stage}:${self:custom.stage}
 
-          export AUTH_KEY="${self:provider.environment.AUTH_KEY}"
+            export AUTH_KEY="${self:provider.environment.AUTH_KEY}"
 
-          # Get the encryption key from Parameter Store
-          N8N_ENCRYPTION_KEY=$(aws ssm get-parameter --with-decryption --region "${REGION}" --name ${AUTH_KEY} --query Parameter.Value --output text)
+            # Get the encryption key from Parameter Store
+            N8N_ENCRYPTION_KEY=$(aws ssm get-parameter --with-decryption --region "${REGION}" --name ${AUTH_KEY} --query Parameter.Value --output text)
 
-          # Run n8n Docker container
+            # Run n8n Docker container
 
-          docker run -d --name n8n_container \
-            --restart always \
-            -p 5678:5678 \
-            -v ${N8N_LOCAL_DATA_DIR}:/home/node/.n8n \
-            -e DB_TYPE=postgresdb \
-            -e DB_POSTGRESDB_HOST="${POSTGRES_DB_HOST}" \
-            -e DB_POSTGRESDB_USER="${POSTGRES_USER}" \
-            -e DB_POSTGRESDB_DATABASE="${POSTGRES_DB_NAME}" \
-            -e DB_POSTGRESDB_PASSWORD="${POSTGRES_PASSWORD}" \
-            -e N8N_ENCRYPTION_KEY="${N8N_ENCRYPTION_KEY}" \
-            -e GENERIC_TIMEZONE="America/Bogota" \
-            -e WEBHOOK_URL="https://flux.getgik.com/" \
-            -e N8N_RUNNERS_ENABLED="true" \
-            -e N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS="true" \
-            n8nio/n8n:${N8N_VERSION}
+            docker run -d --name n8n_container \
+              --restart always \
+              -p 5678:5678 \
+              -v ${N8N_LOCAL_DATA_DIR}:/home/node/.n8n \
+              -e DB_TYPE=postgresdb \
+              -e DB_POSTGRESDB_HOST="${POSTGRES_DB_HOST}" \
+              -e DB_POSTGRESDB_USER="${POSTGRES_USER}" \
+              -e DB_POSTGRESDB_DATABASE="${POSTGRES_DB_NAME}" \
+              -e DB_POSTGRESDB_PASSWORD="${POSTGRES_PASSWORD}" \
+              -e N8N_ENCRYPTION_KEY="${N8N_ENCRYPTION_KEY}" \
+              -e GENERIC_TIMEZONE="America/Bogota" \
+              -e WEBHOOK_URL="https://flux.getgik.com/" \
+              -e N8N_RUNNERS_ENABLED="true" \
+              -e N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS="true" \
+              ${AWS_ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/n8n-${self:custom.stage}:${self:custom.stage}
 
-          # Get n8n Docker container ID
-          N8N_CONTAINER_ID=$(docker inspect --format='{{.Id}}' n8n_container)
-          N8N_DOCKER_LOG_PATH="/var/lib/docker/containers/${N8N_CONTAINER_ID}/${N8N_CONTAINER_ID}-json.log"
+            # Get n8n Docker container ID
+            N8N_CONTAINER_ID=$(docker inspect --format='{{.Id}}' n8n_container)
+            N8N_DOCKER_LOG_PATH="/var/lib/docker/containers/${N8N_CONTAINER_ID}/${N8N_CONTAINER_ID}-json.log"
 
-          # Install CloudWatch Agent
-          yum install -y amazon-cloudwatch-agent
+            # Install CloudWatch Agent
+            yum install -y amazon-cloudwatch-agent
 
-          # CloudWatch Agent config (dynamic for n8n container log)
-          cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<EOF
-          {
-            "logs": {
-              "logs_collected": {
-                "files": {
-                  "collect_list": [
-                    {
-                      "file_path": "/var/log/messages",
-                      "log_group_name": "/aws/ec2/n8n/${self:custom.stage}",
-                      "log_stream_name": "{instance_id}/messages"
-                    },
-                    {
-                      "file_path": "/var/log/docker.log",
-                      "log_group_name": "/aws/ec2/n8n/${self:custom.stage}",
-                      "log_stream_name": "{instance_id}/docker"
-                    },
-                    {
-                      "file_path": "${N8N_DOCKER_LOG_PATH}",
-                      "log_group_name": "/aws/ec2/n8n/${self:custom.stage}",
-                      "log_stream_name": "{instance_id}/n8n-docker"
-                    }
-                  ]
+            # CloudWatch Agent config (dynamic for n8n container log)
+            cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<EOF
+            {
+              "logs": {
+                "logs_collected": {
+                  "files": {
+                    "collect_list": [
+                      {
+                        "file_path": "/var/log/messages",
+                        "log_group_name": "/aws/ec2/n8n/${self:custom.stage}",
+                        "log_stream_name": "{instance_id}/messages"
+                      },
+                      {
+                        "file_path": "/var/log/docker.log",
+                        "log_group_name": "/aws/ec2/n8n/${self:custom.stage}",
+                        "log_stream_name": "{instance_id}/docker"
+                      },
+                      {
+                        "file_path": "${N8N_DOCKER_LOG_PATH}",
+                        "log_group_name": "/aws/ec2/n8n/${self:custom.stage}",
+                        "log_stream_name": "{instance_id}/n8n-docker"
+                      }
+                    ]
+                  }
                 }
               }
             }
-          }
-          EOF
+            EOF
 
-          # Start CloudWatch Agent
-          /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
-            -a fetch-config \
-            -m ec2 \
-            -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json \
-            -s
+            # Start CloudWatch Agent
+            /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+              -a fetch-config \
+              -m ec2 \
+              -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json \
+              -s
 
 
       BlockDeviceMappings: # Optional: Customize root volume

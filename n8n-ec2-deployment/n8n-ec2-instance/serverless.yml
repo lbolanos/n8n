@@ -28,3 +28,4 @@ resources:
   # - ${file(../resources/ec2.yml)}
   - ${file(../resources/ec2_launch_template.yml)}
   - ${file(../resources/asg.yml)}
+
